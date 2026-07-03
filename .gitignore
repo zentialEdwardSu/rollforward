@@ -1,0 +1,5 @@
+/target
+
+# .NET build output for the C# bindings
+bin/
+obj/
