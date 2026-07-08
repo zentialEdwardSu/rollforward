@@ -775,4 +775,13 @@ impl SyncEngine {
             .expect("in_flight lock poisoned")
             .contains(&file_id)
     }
+
+    /// Release the local store's durable resources. For the redb-backed store
+    /// this frees the on-disk file lock so the same db path can be reopened —
+    /// useful after an error when a host wants to reconstruct the engine
+    /// against the same path without dropping every reference first. The engine
+    /// must not be used afterward; subsequent store operations return an error.
+    pub fn close(&self) -> Result<(), SyncError> {
+        self.store.close()
+    }
 }

@@ -731,6 +731,10 @@ static class _UniFFILib {
         ulong @uniffiHandle,RustBuffer @fileId,ulong @upTo,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void UniffiCallbackInterfaceLocalStoreMethod9(
+        ulong @uniffiHandle,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+    );
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod0(
         ulong @uniffiHandle,RustBuffer @fileId,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
@@ -805,6 +809,7 @@ static class _UniFFILib {
         public IntPtr @persistFile;
         public IntPtr @markChunkDone;
         public IntPtr @commitTruncation;
+        public IntPtr @close;
         public IntPtr @uniffiFree;
     }
     [StructLayout(LayoutKind.Sequential)]
@@ -826,6 +831,12 @@ static class _UniFFILib {
         public IntPtr @listStatuses;
         public IntPtr @uniffiFree;
     }
+    
+    
+    
+    
+    
+    
     
     
     
@@ -1063,6 +1074,10 @@ static class _UniFFILib {
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_rollforward_fn_method_localstore_close(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr uniffi_rollforward_fn_clone_redbstore(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
     );
 
@@ -1147,6 +1162,10 @@ static class _UniFFILib {
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_rollforward_fn_method_syncengine_close(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern RustBuffer uniffi_rollforward_fn_method_syncengine_get_manifest(IntPtr @ptr,RustBuffer @fileId,ref UniffiRustCallStatus _uniffi_out_err
     );
 
@@ -1192,6 +1211,10 @@ static class _UniFFILib {
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr uniffi_rollforward_fn_func_new_local(RustBuffer @clientId,RustBuffer @dbPath,RustBuffer @remoteRoot,IntPtr @listener,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr uniffi_rollforward_fn_func_new_with_remote(RustBuffer @clientId,RustBuffer @dbPath,IntPtr @remote,IntPtr @listener,RustBuffer @binaryPolicy,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
@@ -1435,6 +1458,10 @@ static class _UniFFILib {
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_rollforward_checksum_func_new_with_remote(
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern ushort uniffi_rollforward_checksum_func_open_local_folder_remote(
     );
 
@@ -1484,6 +1511,10 @@ static class _UniFFILib {
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern ushort uniffi_rollforward_checksum_method_localstore_commit_truncation(
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_rollforward_checksum_method_localstore_close(
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
@@ -1540,6 +1571,10 @@ static class _UniFFILib {
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern ushort uniffi_rollforward_checksum_method_remotestorage_list_statuses(
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_rollforward_checksum_method_syncengine_close(
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
@@ -1606,6 +1641,12 @@ static class _UniFFILib {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_func_new_local();
             if (checksum != 26453) {
                 throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_func_new_local` checksum `26453`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_func_new_with_remote();
+            if (checksum != 3698) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_func_new_with_remote` checksum `3698`, library returned `{checksum}`");
             }
         }
         {
@@ -1684,6 +1725,12 @@ static class _UniFFILib {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_localstore_commit_truncation();
             if (checksum != 19019) {
                 throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_localstore_commit_truncation` checksum `19019`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_localstore_close();
+            if (checksum != 30784) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_localstore_close` checksum `30784`, library returned `{checksum}`");
             }
         }
         {
@@ -1768,6 +1815,12 @@ static class _UniFFILib {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_list_statuses();
             if (checksum != 39875) {
                 throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_list_statuses` checksum `39875`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_syncengine_close();
+            if (checksum != 37474) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_syncengine_close` checksum `37474`, library returned `{checksum}`");
             }
         }
         {
@@ -2471,6 +2524,14 @@ internal interface LocalStore {
     /// </summary>
     /// <exception cref="SyncException"></exception>
     void CommitTruncation(string @fileId, ulong @upTo);
+    /// <summary>
+    /// Release the backend's durable resources (for a file-locked backend such
+    /// as redb, this frees the on-disk lock so the same path can be reopened).
+    /// Idempotent: closing an already-closed store is a no-op. Calls after close
+    /// return an error rather than operating on a released backend.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    void Close();
 }
 /// <summary>
 /// Local durable state for the engine. Reads return owned values; each write is
@@ -2677,6 +2738,22 @@ internal class LocalStoreImpl : LocalStore, IDisposable {
         CallWithPointer(thisPtr =>
     _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
     _UniFFILib.uniffi_rollforward_fn_method_localstore_commit_truncation(thisPtr, FfiConverterString.INSTANCE.Lower(@fileId), FfiConverterUInt64.INSTANCE.Lower(@upTo), ref _status)
+));
+    }
+    
+    
+    
+    /// <summary>
+    /// Release the backend's durable resources (for a file-locked backend such
+    /// as redb, this frees the on-disk lock so the same path can be reopened).
+    /// Idempotent: closing an already-closed store is a no-op. Calls after close
+    /// return an error rather than operating on a released backend.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    public void Close() {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_rollforward_fn_method_localstore_close(thisPtr,  ref _status)
 ));
     }
     
@@ -2917,6 +2994,29 @@ class UniffiCallbackInterfaceLocalStore {
             throw new InternalException($"No callback in handlemap '{handle}'");
         }
     }
+    static void Close(ulong @uniffiHandle,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+        var handle = @uniffiHandle;
+        if (FfiConverterTypeLocalStore.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
+            try {
+            uniffiObject.Close();
+            _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
+            }
+            catch (SyncException e) {
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.ERROR;
+                _uniffi_out_err.error_buf = FfiConverterTypeSyncError.INSTANCE.Lower(e);
+            }
+            catch (System.Exception e){
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.UNEXPECTED_ERROR;
+                try {
+                    _uniffi_out_err.error_buf = FfiConverterString.INSTANCE.Lower(e.Message);
+                }
+                catch {
+                }
+            }
+        } else {
+            throw new InternalException($"No callback in handlemap '{handle}'");
+        }
+    }
 
     static void UniffiFree(ulong @handle) {
         FfiConverterTypeLocalStore.INSTANCE.handleMap.Remove(@handle);
@@ -2930,6 +3030,7 @@ class UniffiCallbackInterfaceLocalStore {
     static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod6 _m6 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod6(PersistFile);
     static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod7 _m7 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod7(MarkChunkDone);
     static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod8 _m8 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod8(CommitTruncation);
+    static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod9 _m9 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod9(Close);
     static _UniFFILib.UniffiCallbackInterfaceFree _callback_interface_free = new _UniFFILib.UniffiCallbackInterfaceFree(UniffiFree);
 
     public static _UniFFILib.UniffiVTableCallbackInterfaceLocalStore _vtable = new _UniFFILib.UniffiVTableCallbackInterfaceLocalStore {
@@ -2942,6 +3043,7 @@ class UniffiCallbackInterfaceLocalStore {
         @persistFile = Marshal.GetFunctionPointerForDelegate(_m6),
         @markChunkDone = Marshal.GetFunctionPointerForDelegate(_m7),
         @commitTruncation = Marshal.GetFunctionPointerForDelegate(_m8),
+        @close = Marshal.GetFunctionPointerForDelegate(_m9),
         @uniffiFree = Marshal.GetFunctionPointerForDelegate(_callback_interface_free)
     };
 
@@ -3912,6 +4014,15 @@ class FfiConverterTypeRemoteStorage: FfiConverter<RemoteStorage, IntPtr> {
 /// </summary>
 internal interface ISyncEngine {
     /// <summary>
+    /// Release the local store's durable resources. For the redb-backed store
+    /// this frees the on-disk file lock so the same db path can be reopened —
+    /// useful after an error when a host wants to reconstruct the engine
+    /// against the same path without dropping every reference first. The engine
+    /// must not be used afterward; subsequent store operations return an error.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    void Close();
+    /// <summary>
     /// Current chunk manifest of a tracked binary file.
     /// </summary>
     /// <exception cref="SyncException"></exception>
@@ -4061,6 +4172,23 @@ internal class SyncEngine : ISyncEngine, IDisposable {
         }
     }
 
+    
+    /// <summary>
+    /// Release the local store's durable resources. For the redb-backed store
+    /// this frees the on-disk file lock so the same db path can be reopened —
+    /// useful after an error when a host wants to reconstruct the engine
+    /// against the same path without dropping every reference first. The engine
+    /// must not be used afterward; subsequent store operations return an error.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    public void Close() {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_rollforward_fn_method_syncengine_close(thisPtr,  ref _status)
+));
+    }
+    
+    
     
     /// <summary>
     /// Current chunk manifest of a tracked binary file.
@@ -5153,6 +5281,26 @@ internal static class RollforwardMethods {
         return FfiConverterTypeSyncEngine.INSTANCE.Lift(
     _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
     _UniFFILib.uniffi_rollforward_fn_func_new_local(FfiConverterString.INSTANCE.Lower(@clientId), FfiConverterString.INSTANCE.Lower(@dbPath), FfiConverterString.INSTANCE.Lower(@remoteRoot), FfiConverterTypeEngineNotificationListener.INSTANCE.Lower(@listener), ref _status)
+));
+    }
+
+
+    /// <summary>
+    /// Assemble a [`SyncEngine`] with the built-in [`RedbStore`] at `db_path` as the
+    /// default local store, an injected `remote`, and an explicit binary conflict
+    /// policy.
+    ///
+    /// This is the middle ground between [`new_local`] (both backends built-in) and
+    /// [`new_engine`] (both injected): a host that is happy with redb for local
+    /// durable state but supplies its own remote (S3/WebDAV/…) and wants to choose
+    /// the conflict policy. Call [`SyncEngine::close`] to release the redb file lock
+    /// when done.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    public static SyncEngine NewWithRemote(string @clientId, string @dbPath, RemoteStorage @remote, EngineNotificationListener @listener, BinaryConflictPolicy @binaryPolicy) {
+        return FfiConverterTypeSyncEngine.INSTANCE.Lift(
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_rollforward_fn_func_new_with_remote(FfiConverterString.INSTANCE.Lower(@clientId), FfiConverterString.INSTANCE.Lower(@dbPath), FfiConverterTypeRemoteStorage.INSTANCE.Lower(@remote), FfiConverterTypeEngineNotificationListener.INSTANCE.Lower(@listener), FfiConverterTypeBinaryConflictPolicy.INSTANCE.Lower(@binaryPolicy), ref _status)
 ));
     }
 

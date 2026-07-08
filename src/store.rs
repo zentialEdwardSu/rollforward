@@ -12,6 +12,7 @@
 //! aborting rolls it back. That is the engine's transaction-rollback guarantee.
 
 use std::path::Path;
+use std::sync::RwLock;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
@@ -54,6 +55,12 @@ pub trait LocalStore: Send + Sync {
     /// Atomically commit a truncation: drop cached oplogs `<= up_to` and record
     /// the new baseline sequence.
     fn commit_truncation(&self, file_id: String, up_to: u64) -> Result<(), SyncError>;
+
+    /// Release the backend's durable resources (for a file-locked backend such
+    /// as redb, this frees the on-disk lock so the same path can be reopened).
+    /// Idempotent: closing an already-closed store is a no-op. Calls after close
+    /// return an error rather than operating on a released backend.
+    fn close(&self) -> Result<(), SyncError>;
 }
 
 /// Per-file serialized state (see `engine::TrackedFile`).
@@ -79,8 +86,15 @@ fn db_err<E: std::fmt::Display>(e: E) -> SyncError {
 /// tests and by the default `new_local` engine.
 #[derive(uniffi::Object)]
 pub struct RedbStore {
-    /// The underlying redb database handle.
-    db: Database,
+    /// The underlying redb database handle. Held in an `Option` so [`close`]
+    /// can drop it — redb releases its on-disk file lock only when the
+    /// `Database` is dropped (it exposes no explicit close) — while the
+    /// `RedbStore` (and any `Arc<SyncEngine>` owning it) stays alive. `None`
+    /// after close; every access goes through [`with_db`], which errors then.
+    ///
+    /// [`close`]: RedbStore::close
+    /// [`with_db`]: RedbStore::with_db
+    db: RwLock<Option<Database>>,
 }
 
 impl RedbStore {
@@ -98,7 +112,22 @@ impl RedbStore {
             txn.open_table(CHUNK_XFER).map_err(db_err)?;
         }
         txn.commit().map_err(db_err)?;
-        Ok(Self { db })
+        Ok(Self {
+            db: RwLock::new(Some(db)),
+        })
+    }
+
+    /// Borrow the open `Database` for the duration of `f`. Errors if the store
+    /// has been closed, so no method operates on a released backend.
+    fn with_db<F, T>(&self, f: F) -> Result<T, SyncError>
+    where
+        F: FnOnce(&Database) -> Result<T, SyncError>,
+    {
+        let guard = self.db.read().expect("redb store lock poisoned");
+        let db = guard.as_ref().ok_or_else(|| SyncError::IoError {
+            msg: "redb store is closed".into(),
+        })?;
+        f(db)
     }
 
     /// Run `f` inside a single write transaction, committing on success.
@@ -106,65 +135,79 @@ impl RedbStore {
     where
         F: FnOnce(&WriteTransaction) -> Result<(), SyncError>,
     {
-        let txn = self.db.begin_write().map_err(db_err)?;
-        f(&txn)?;
-        txn.commit().map_err(db_err)
+        self.with_db(|db| {
+            let txn = db.begin_write().map_err(db_err)?;
+            f(&txn)?;
+            txn.commit().map_err(db_err)
+        })
     }
 }
 
 impl LocalStore for RedbStore {
     fn get_file_state(&self, file_id: String) -> Result<Option<Vec<u8>>, SyncError> {
-        let txn = self.db.begin_read().map_err(db_err)?;
-        let t = txn.open_table(FILES).map_err(db_err)?;
-        Ok(t.get(file_id.as_str())
-            .map_err(db_err)?
-            .map(|v| v.value().to_vec()))
+        self.with_db(|db| {
+            let txn = db.begin_read().map_err(db_err)?;
+            let t = txn.open_table(FILES).map_err(db_err)?;
+            Ok(t.get(file_id.as_str())
+                .map_err(db_err)?
+                .map(|v| v.value().to_vec()))
+        })
     }
 
     fn list_files(&self) -> Result<Vec<String>, SyncError> {
-        let txn = self.db.begin_read().map_err(db_err)?;
-        let t = txn.open_table(FILES).map_err(db_err)?;
-        let mut out = Vec::new();
-        for row in t.iter().map_err(db_err)? {
-            let (k, _) = row.map_err(db_err)?;
-            out.push(k.value().to_string());
-        }
-        Ok(out)
+        self.with_db(|db| {
+            let txn = db.begin_read().map_err(db_err)?;
+            let t = txn.open_table(FILES).map_err(db_err)?;
+            let mut out = Vec::new();
+            for row in t.iter().map_err(db_err)? {
+                let (k, _) = row.map_err(db_err)?;
+                out.push(k.value().to_string());
+            }
+            Ok(out)
+        })
     }
 
     fn list_oplogs(&self, file_id: String) -> Result<Vec<OplogCacheEntry>, SyncError> {
-        let txn = self.db.begin_read().map_err(db_err)?;
-        let t = txn.open_table(OPLOG).map_err(db_err)?;
-        let mut out = Vec::new();
-        for row in t
-            .range((file_id.as_str(), 0)..=(file_id.as_str(), u64::MAX))
-            .map_err(db_err)?
-        {
-            let (k, v) = row.map_err(db_err)?;
-            out.push(OplogCacheEntry {
-                sequence: k.value().1,
-                data: v.value().to_vec(),
-            });
-        }
-        Ok(out)
+        self.with_db(|db| {
+            let txn = db.begin_read().map_err(db_err)?;
+            let t = txn.open_table(OPLOG).map_err(db_err)?;
+            let mut out = Vec::new();
+            for row in t
+                .range((file_id.as_str(), 0)..=(file_id.as_str(), u64::MAX))
+                .map_err(db_err)?
+            {
+                let (k, v) = row.map_err(db_err)?;
+                out.push(OplogCacheEntry {
+                    sequence: k.value().1,
+                    data: v.value().to_vec(),
+                });
+            }
+            Ok(out)
+        })
     }
 
     fn get_baseline_meta(&self, file_id: String) -> Result<Option<u64>, SyncError> {
-        let txn = self.db.begin_read().map_err(db_err)?;
-        let t = txn.open_table(BASELINE_META).map_err(db_err)?;
-        Ok(t.get(file_id.as_str()).map_err(db_err)?.map(|v| v.value()))
+        self.with_db(|db| {
+            let txn = db.begin_read().map_err(db_err)?;
+            let t = txn.open_table(BASELINE_META).map_err(db_err)?;
+            Ok(t.get(file_id.as_str()).map_err(db_err)?.map(|v| v.value()))
+        })
     }
 
     fn get_sync_cursor(&self, file_id: String) -> Result<Option<u64>, SyncError> {
-        let txn = self.db.begin_read().map_err(db_err)?;
-        let t = txn.open_table(SYNC_CURSOR).map_err(db_err)?;
-        Ok(t.get(file_id.as_str()).map_err(db_err)?.map(|v| v.value()))
+        self.with_db(|db| {
+            let txn = db.begin_read().map_err(db_err)?;
+            let t = txn.open_table(SYNC_CURSOR).map_err(db_err)?;
+            Ok(t.get(file_id.as_str()).map_err(db_err)?.map(|v| v.value()))
+        })
     }
 
     fn is_chunk_done(&self, hash: String) -> Result<bool, SyncError> {
-        let txn = self.db.begin_read().map_err(db_err)?;
-        let t = txn.open_table(CHUNK_XFER).map_err(db_err)?;
-        Ok(t.get(hash.as_str()).map_err(db_err)?.map(|v| v.value()) == Some(XFER_DONE))
+        self.with_db(|db| {
+            let txn = db.begin_read().map_err(db_err)?;
+            let t = txn.open_table(CHUNK_XFER).map_err(db_err)?;
+            Ok(t.get(hash.as_str()).map_err(db_err)?.map(|v| v.value()) == Some(XFER_DONE))
+        })
     }
 
     fn persist_file(
@@ -222,6 +265,15 @@ impl LocalStore for RedbStore {
             }
             Ok(())
         })
+    }
+
+    fn close(&self) -> Result<(), SyncError> {
+        // Take the Database out and drop it: redb releases the on-disk file
+        // lock on Database drop (there is no explicit close in redb). Idempotent
+        // — a second close finds None and does nothing.
+        let db = self.db.write().expect("redb store lock poisoned").take();
+        drop(db);
+        Ok(())
     }
 }
 
@@ -299,6 +351,32 @@ mod tests {
             .collect();
         assert_eq!(remaining, vec![4, 5]);
         assert_eq!(store.get_baseline_meta("f1".into()).unwrap(), Some(3));
+    }
+
+    #[test]
+    fn close_releases_lock_so_path_can_be_reopened() {
+        // The point of close(): redb holds an exclusive file lock for the
+        // Database's lifetime, so a still-alive RedbStore would make reopening
+        // the same path fail. close() must free the lock while the RedbStore
+        // value itself lives on — letting a host reconstruct after an error.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("state.redb");
+        let store = RedbStore::open(&path).unwrap();
+        store
+            .persist_file("f1".into(), b"v".to_vec(), 1, None)
+            .unwrap();
+
+        store.close().unwrap();
+
+        // Store outlives close, but the lock is gone: reopen must succeed and
+        // see the committed state.
+        let reopened = RedbStore::open(&path).expect("reopen after close");
+        assert_eq!(reopened.get_file_state("f1".into()).unwrap().unwrap(), b"v");
+
+        // Operations after close fail loudly rather than touching a released db.
+        assert!(store.get_file_state("f1".into()).is_err());
+        // close() is idempotent.
+        store.close().unwrap();
     }
 
     #[test]

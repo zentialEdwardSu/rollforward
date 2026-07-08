@@ -74,4 +74,7 @@ internal sealed class InMemoryStore : LocalStore
             _baselineMeta[fileId] = upTo;
         }
     }
+
+    // No OS-level resources to release; nothing to do.
+    public void Close() { }
 }

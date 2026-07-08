@@ -389,6 +389,9 @@ impl LocalStore for FailingStore {
     fn commit_truncation(&self, file_id: String, up_to: u64) -> Result<(), SyncError> {
         self.inner.commit_truncation(file_id, up_to)
     }
+    fn close(&self) -> Result<(), SyncError> {
+        self.inner.close()
+    }
 }
 
 #[test]

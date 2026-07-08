@@ -5,13 +5,18 @@
 //! [`store::LocalStore`] (local durable state) — and the caller injects the
 //! implementations via [`SyncEngine::with_backends`].
 //!
-//! [`remote::LocalFolderRemote`] and [`store::RedbStore`] are **test/local
-//! implementations**, not built-in defaults: they let the engine run and be
-//! *observed* locally — you can inspect the remote as a plain directory tree
-//! and the store as a redb file on disk. A production host supplies its own
-//! backends (network drive / S3 / WebDAV, and whatever durable store it wants).
-//! [`new_local`] is a convenience that wires both local impls together for
-//! tests and local runs.
+//! [`store::RedbStore`] is the **default local-store backend**: the convenience
+//! constructors [`new_local`] and [`new_with_remote`] wire it up so a host gets
+//! durable local state without implementing [`store::LocalStore`] itself. A host
+//! that wants a different durable store still injects one via [`new_engine`] /
+//! [`SyncEngine::with_backends`]. Because redb holds an exclusive file lock for
+//! the life of its handle, hosts should call [`SyncEngine::close`] to release it
+//! (e.g. before reopening the same path after an error).
+//!
+//! [`remote::LocalFolderRemote`] remains a **test/local remote** — no
+//! constructor defaults the remote, since production hosts point at their own
+//! (network drive / S3 / WebDAV). Both built-ins are directly inspectable (a
+//! redb file, a directory tree), which is how the tests observe behavior.
 
 // These pedantic lints are intentionally relaxed crate-wide:
 // - `missing_errors_doc` / `missing_panics_doc`: every fallible fn returns the
@@ -71,6 +76,33 @@ pub fn new_local(
         remote,
         listener,
         BinaryConflictPolicy::KeepBoth,
+    )))
+}
+
+/// Assemble a [`SyncEngine`] with the built-in [`RedbStore`] at `db_path` as the
+/// default local store, an injected `remote`, and an explicit binary conflict
+/// policy.
+///
+/// This is the middle ground between [`new_local`] (both backends built-in) and
+/// [`new_engine`] (both injected): a host that is happy with redb for local
+/// durable state but supplies its own remote (S3/WebDAV/…) and wants to choose
+/// the conflict policy. Call [`SyncEngine::close`] to release the redb file lock
+/// when done.
+#[uniffi::export]
+pub fn new_with_remote(
+    client_id: String,
+    db_path: String,
+    remote: Arc<dyn RemoteStorage>,
+    listener: Arc<dyn EngineNotificationListener>,
+    binary_policy: BinaryConflictPolicy,
+) -> Result<Arc<SyncEngine>, SyncError> {
+    let store = Arc::new(RedbStore::open(db_path)?);
+    Ok(Arc::new(SyncEngine::with_backends(
+        client_id,
+        store,
+        remote,
+        listener,
+        binary_policy,
     )))
 }
 
