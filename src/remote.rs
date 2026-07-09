@@ -20,6 +20,11 @@ use crate::types::{ClientStatus, OpLogEntry, RemoteLogItem, SyncError};
 /// [`ClientStatus`] record instead of `(String, u64)`.
 #[uniffi::export(with_foreign)]
 pub trait RemoteStorage: Send + Sync {
+    /// List the ids of every file that has oplog history on the remote. Used by
+    /// binary GC to compute a *global* live-chunk set: packs are a shared,
+    /// content-addressed namespace across all files, so reclaiming a pack is
+    /// only safe once no surviving manifest of *any* file references its chunks.
+    fn list_files(&self) -> Result<Vec<String>, SyncError>;
     /// List all oplog objects for a file.
     fn list_oplogs(&self, file_id: String) -> Result<Vec<RemoteLogItem>, SyncError>;
     /// Append an oplog entry unconditionally, overwriting any object with the
@@ -33,15 +38,31 @@ pub trait RemoteStorage: Send + Sync {
     /// Delete an oplog object.
     fn delete_oplog(&self, file_id: String, remote_path: String) -> Result<(), SyncError>;
 
-    /// Store a content-addressed chunk. Idempotent: writing an existing hash is
-    /// a no-op success.
-    fn put_chunk(&self, hash: String, data: Vec<u8>) -> Result<(), SyncError>;
-    /// Fetch a chunk's bytes by hash.
-    fn get_chunk(&self, hash: String) -> Result<Vec<u8>, SyncError>;
-    /// Delete a chunk by hash.
-    fn delete_chunk(&self, hash: String) -> Result<(), SyncError>;
-    /// List all stored chunk hashes (for garbage collection).
-    fn list_chunks(&self) -> Result<Vec<String>, SyncError>;
+    /// Store a pack object (many concatenated chunks) under its content address.
+    /// Idempotent: writing an existing pack id is a no-op success.
+    fn put_pack(&self, pack_id: String, data: Vec<u8>) -> Result<(), SyncError>;
+    /// Fetch a byte range `[offset, offset+length)` from a pack — the chunk's
+    /// bytes, located via a pack index.
+    fn get_pack_range(
+        &self,
+        pack_id: String,
+        offset: u64,
+        length: u32,
+    ) -> Result<Vec<u8>, SyncError>;
+    /// List all stored pack ids (for garbage collection / repack).
+    fn list_packs(&self) -> Result<Vec<String>, SyncError>;
+    /// Delete a pack object by id.
+    fn delete_pack(&self, pack_id: String) -> Result<(), SyncError>;
+
+    /// Store a pack index object (the `hash -> offset/length` map for one pack).
+    /// Idempotent by id (`index_id == pack_id`).
+    fn put_pack_index(&self, index_id: String, data: Vec<u8>) -> Result<(), SyncError>;
+    /// Fetch a pack index's bytes by id.
+    fn get_pack_index(&self, index_id: String) -> Result<Vec<u8>, SyncError>;
+    /// List all stored pack index ids.
+    fn list_pack_indexes(&self) -> Result<Vec<String>, SyncError>;
+    /// Delete a pack index object by id.
+    fn delete_pack_index(&self, index_id: String) -> Result<(), SyncError>;
 
     /// Store a compressed baseline snapshot for a file at a given sequence.
     fn put_baseline(&self, file_id: String, seq: u64, data: Vec<u8>) -> Result<(), SyncError>;
@@ -62,7 +83,8 @@ pub trait RemoteStorage: Send + Sync {
 /// ```text
 /// <root>/<file_id>/oplogs/{seq}_{client}.oplog
 /// <root>/<file_id>/baselines/baseline_<seq>.zst
-/// <root>/chunks/<hash>
+/// <root>/packs/<pack_id>
+/// <root>/pack-indexes/<pack_id>
 /// <root>/clients_status/<client>.status
 /// ```
 #[derive(uniffi::Object)]
@@ -94,9 +116,14 @@ impl LocalFolderRemote {
         self.root.join(file_id).join("baselines")
     }
 
-    /// `<root>/chunks`
-    fn chunk_dir(&self) -> PathBuf {
-        self.root.join("chunks")
+    /// `<root>/packs`
+    fn pack_dir(&self) -> PathBuf {
+        self.root.join("packs")
+    }
+
+    /// `<root>/pack-indexes`
+    fn pack_index_dir(&self) -> PathBuf {
+        self.root.join("pack-indexes")
     }
 
     /// `<root>/clients_status`
@@ -116,6 +143,23 @@ impl LocalFolderRemote {
 }
 
 impl RemoteStorage for LocalFolderRemote {
+    fn list_files(&self) -> Result<Vec<String>, SyncError> {
+        // Every top-level dir is a file id except the three reserved global
+        // stores. A dir counts as a file only if it actually has an `oplogs`
+        // subdir, so a stray/empty dir never masquerades as a file.
+        const RESERVED: [&str; 3] = ["packs", "pack-indexes", "clients_status"];
+        let mut out = Vec::new();
+        for name in list_dir_names(&self.root)? {
+            if RESERVED.contains(&name.as_str()) {
+                continue;
+            }
+            if self.oplog_dir(&name).exists() {
+                out.push(name);
+            }
+        }
+        Ok(out)
+    }
+
     fn list_oplogs(&self, file_id: String) -> Result<Vec<RemoteLogItem>, SyncError> {
         let dir = self.oplog_dir(&file_id);
         if !dir.exists() {
@@ -170,40 +214,46 @@ impl RemoteStorage for LocalFolderRemote {
         }
     }
 
-    fn put_chunk(&self, hash: String, data: Vec<u8>) -> Result<(), SyncError> {
-        let dir = self.chunk_dir();
-        fs::create_dir_all(&dir).map_err(io)?;
-        let path = dir.join(hash);
-        if path.exists() {
-            return Ok(()); // content-addressed: identical bytes, skip.
-        }
-        fs::write(path, data).map_err(io)
+    fn put_pack(&self, pack_id: String, data: Vec<u8>) -> Result<(), SyncError> {
+        write_addressed(&self.pack_dir(), &pack_id, data)
     }
 
-    fn get_chunk(&self, hash: String) -> Result<Vec<u8>, SyncError> {
-        fs::read(self.chunk_dir().join(hash)).map_err(io)
+    fn get_pack_range(
+        &self,
+        pack_id: String,
+        offset: u64,
+        length: u32,
+    ) -> Result<Vec<u8>, SyncError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = fs::File::open(self.pack_dir().join(pack_id)).map_err(io)?;
+        f.seek(SeekFrom::Start(offset)).map_err(io)?;
+        let mut buf = vec![0u8; length as usize];
+        f.read_exact(&mut buf).map_err(io)?;
+        Ok(buf)
     }
 
-    fn delete_chunk(&self, hash: String) -> Result<(), SyncError> {
-        let path = self.chunk_dir().join(hash);
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(io(e)),
-        }
+    fn list_packs(&self) -> Result<Vec<String>, SyncError> {
+        list_dir_names(&self.pack_dir())
     }
 
-    fn list_chunks(&self) -> Result<Vec<String>, SyncError> {
-        let dir = self.chunk_dir();
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::new();
-        for entry in fs::read_dir(&dir).map_err(io)? {
-            let entry = entry.map_err(io)?;
-            out.push(entry.file_name().to_string_lossy().into_owned());
-        }
-        Ok(out)
+    fn delete_pack(&self, pack_id: String) -> Result<(), SyncError> {
+        delete_if_present(&self.pack_dir().join(pack_id))
+    }
+
+    fn put_pack_index(&self, index_id: String, data: Vec<u8>) -> Result<(), SyncError> {
+        write_addressed(&self.pack_index_dir(), &index_id, data)
+    }
+
+    fn get_pack_index(&self, index_id: String) -> Result<Vec<u8>, SyncError> {
+        fs::read(self.pack_index_dir().join(index_id)).map_err(io)
+    }
+
+    fn list_pack_indexes(&self) -> Result<Vec<String>, SyncError> {
+        list_dir_names(&self.pack_index_dir())
+    }
+
+    fn delete_pack_index(&self, index_id: String) -> Result<(), SyncError> {
+        delete_if_present(&self.pack_index_dir().join(index_id))
     }
 
     fn put_baseline(&self, file_id: String, seq: u64, data: Vec<u8>) -> Result<(), SyncError> {
@@ -287,6 +337,39 @@ fn baseline_name(seq: u64) -> String {
     format!("baseline_{seq}.zst")
 }
 
+/// Write `data` to `dir/name`, creating `dir`. Content-addressed: an existing
+/// object is left as-is (identical bytes), making the write idempotent.
+fn write_addressed(dir: &std::path::Path, name: &str, data: Vec<u8>) -> Result<(), SyncError> {
+    fs::create_dir_all(dir).map_err(io)?;
+    let path = dir.join(name);
+    if path.exists() {
+        return Ok(());
+    }
+    fs::write(path, data).map_err(io)
+}
+
+/// List the file names directly under `dir` (empty if `dir` is absent).
+fn list_dir_names(dir: &std::path::Path) -> Result<Vec<String>, SyncError> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        out.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    Ok(out)
+}
+
+/// Delete `path`, treating an already-absent file as success.
+fn delete_if_present(path: &std::path::Path) -> Result<(), SyncError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io(e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,15 +427,31 @@ mod tests {
     }
 
     #[test]
-    fn chunks_round_trip_and_list() {
+    fn packs_round_trip_range_read_and_list() {
         let dir = TempDir::new().unwrap();
         let remote = LocalFolderRemote::new(dir.path()).unwrap();
-        remote.put_chunk("h1".into(), b"hello".to_vec()).unwrap();
-        remote.put_chunk("h1".into(), b"hello".to_vec()).unwrap(); // idempotent
-        assert_eq!(remote.get_chunk("h1".into()).unwrap(), b"hello");
-        assert_eq!(remote.list_chunks().unwrap(), vec!["h1".to_string()]);
-        remote.delete_chunk("h1".into()).unwrap();
-        assert!(remote.list_chunks().unwrap().is_empty());
+        let data = b"HELLOWORLD".to_vec();
+        remote.put_pack("p1".into(), data.clone()).unwrap();
+        remote.put_pack("p1".into(), data).unwrap(); // idempotent
+        // Range read pulls a chunk-sized slice out of the pack.
+        assert_eq!(remote.get_pack_range("p1".into(), 5, 5).unwrap(), b"WORLD");
+        assert_eq!(remote.get_pack_range("p1".into(), 0, 5).unwrap(), b"HELLO");
+        assert_eq!(remote.list_packs().unwrap(), vec!["p1".to_string()]);
+        remote.delete_pack("p1".into()).unwrap();
+        assert!(remote.list_packs().unwrap().is_empty());
+        // Deleting an absent pack is a no-op success.
+        remote.delete_pack("p1".into()).unwrap();
+    }
+
+    #[test]
+    fn pack_indexes_round_trip_and_list() {
+        let dir = TempDir::new().unwrap();
+        let remote = LocalFolderRemote::new(dir.path()).unwrap();
+        remote.put_pack_index("p1".into(), b"idx".to_vec()).unwrap();
+        assert_eq!(remote.get_pack_index("p1".into()).unwrap(), b"idx");
+        assert_eq!(remote.list_pack_indexes().unwrap(), vec!["p1".to_string()]);
+        remote.delete_pack_index("p1".into()).unwrap();
+        assert!(remote.list_pack_indexes().unwrap().is_empty());
     }
 
     #[test]

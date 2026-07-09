@@ -37,7 +37,7 @@ Decentralized sync engine (see `design.md` for the full architecture). Modules u
 - `remote.rs` — `RemoteStorage` trait (the dumb-remote abstraction) + `LocalFolderRemote` (std::fs impl used in tests). `put_oplog_cas` underpins CAS retry.
 - `store.rs` — redb-backed `LocalStore`; multi-table steps run in one `WriteTransaction` (the transaction-rollback primitive).
 - `text.rs` — yrs (y-crdt) text wrapper: incremental deltas, order-independent merge, baseline snapshots.
-- `binary.rs` — fastcdc chunking + blake3 hashing, three-way manifest merge, chunk GC.
+- `binary.rs` — fastcdc chunking + blake3 hashing, three-way manifest merge, pack format (chunks batched into ~4 MiB content-addressed pack objects + sibling pack indexes).
 - `engine.rs` — the `SyncEngine` state machine: write flow (CAS retry), pull/merge, rollback, truncation, chunk-level resume.
 - `tests/sync.rs` — end-to-end integration tests (two engines over a shared `LocalFolderRemote`).
 

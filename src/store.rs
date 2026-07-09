@@ -36,8 +36,6 @@ pub trait LocalStore: Send + Sync {
     fn get_baseline_meta(&self, file_id: String) -> Result<Option<u64>, SyncError>;
     /// Read the last-synced sequence for a file.
     fn get_sync_cursor(&self, file_id: String) -> Result<Option<u64>, SyncError>;
-    /// True if a chunk has already been transferred (resume skips these).
-    fn is_chunk_done(&self, hash: String) -> Result<bool, SyncError>;
 
     /// Atomically persist a file's serialized state, its sync cursor, and
     /// (optionally) one cached oplog entry. All-or-nothing.
@@ -49,8 +47,15 @@ pub trait LocalStore: Send + Sync {
         cache_entry: Option<OplogCacheEntry>,
     ) -> Result<(), SyncError>;
 
-    /// Atomically mark a chunk's transfer as complete.
-    fn mark_chunk_done(&self, hash: String) -> Result<(), SyncError>;
+    /// Batch-cache oplog entries fetched from the remote, keyed by
+    /// `(file_id, sequence)`. Idempotent (overwrites the same key). This is a
+    /// performance hint for incremental reads, not authoritative state: the
+    /// remote listing is the source of truth, and cached rows are only ever
+    /// consumed as a byte-source for sequences that still appear in that listing
+    /// (so stale rows below a remote truncation are inert). An empty batch is a
+    /// no-op.
+    fn cache_oplogs(&self, file_id: String, entries: Vec<OplogCacheEntry>)
+    -> Result<(), SyncError>;
 
     /// Atomically commit a truncation: drop cached oplogs `<= up_to` and record
     /// the new baseline sequence.
@@ -71,11 +76,6 @@ const OPLOG: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("oplog")
 const BASELINE_META: TableDefinition<&str, u64> = TableDefinition::new("baseline_meta");
 /// Last successfully-synced sequence per file (drives status reporting).
 const SYNC_CURSOR: TableDefinition<&str, u64> = TableDefinition::new("sync_cursor");
-/// Per-chunk transfer state for chunk-level resume: 0 = pending, 1 = done.
-const CHUNK_XFER: TableDefinition<&str, u8> = TableDefinition::new("chunk_xfer");
-
-/// Chunk transfer marker: transfer completed.
-const XFER_DONE: u8 = 1;
 
 /// Map a redb error into a [`SyncError::IoError`].
 fn db_err<E: std::fmt::Display>(e: E) -> SyncError {
@@ -109,7 +109,6 @@ impl RedbStore {
             txn.open_table(OPLOG).map_err(db_err)?;
             txn.open_table(BASELINE_META).map_err(db_err)?;
             txn.open_table(SYNC_CURSOR).map_err(db_err)?;
-            txn.open_table(CHUNK_XFER).map_err(db_err)?;
         }
         txn.commit().map_err(db_err)?;
         Ok(Self {
@@ -202,14 +201,6 @@ impl LocalStore for RedbStore {
         })
     }
 
-    fn is_chunk_done(&self, hash: String) -> Result<bool, SyncError> {
-        self.with_db(|db| {
-            let txn = db.begin_read().map_err(db_err)?;
-            let t = txn.open_table(CHUNK_XFER).map_err(db_err)?;
-            Ok(t.get(hash.as_str()).map_err(db_err)?.map(|v| v.value()) == Some(XFER_DONE))
-        })
-    }
-
     fn persist_file(
         &self,
         file_id: String,
@@ -236,10 +227,20 @@ impl LocalStore for RedbStore {
         })
     }
 
-    fn mark_chunk_done(&self, hash: String) -> Result<(), SyncError> {
+    fn cache_oplogs(
+        &self,
+        file_id: String,
+        entries: Vec<OplogCacheEntry>,
+    ) -> Result<(), SyncError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
         self.write(|txn| {
-            let mut t = txn.open_table(CHUNK_XFER).map_err(db_err)?;
-            t.insert(hash.as_str(), XFER_DONE).map_err(db_err)?;
+            let mut t = txn.open_table(OPLOG).map_err(db_err)?;
+            for entry in &entries {
+                t.insert((file_id.as_str(), entry.sequence), entry.data.as_slice())
+                    .map_err(db_err)?;
+            }
             Ok(())
         })
     }
@@ -380,12 +381,47 @@ mod tests {
     }
 
     #[test]
-    fn chunk_transfer_state() {
+    fn cache_oplogs_batch_inserts_is_idempotent_and_empty_is_noop() {
         let dir = TempDir::new().unwrap();
         let store = store_at(&dir);
-        assert!(!store.is_chunk_done("h1".into()).unwrap());
-        store.mark_chunk_done("h1".into()).unwrap();
-        assert!(store.is_chunk_done("h1".into()).unwrap());
-        assert!(!store.is_chunk_done("missing".into()).unwrap());
+        // Empty batch is a no-op.
+        store.cache_oplogs("f1".into(), Vec::new()).unwrap();
+        assert!(store.list_oplogs("f1".into()).unwrap().is_empty());
+
+        // Batch insert lands all entries, ascending.
+        store
+            .cache_oplogs("f1".into(), vec![cache(2, b"two"), cache(1, b"one")])
+            .unwrap();
+        assert_eq!(
+            store.list_oplogs("f1".into()).unwrap(),
+            vec![cache(1, b"one"), cache(2, b"two")]
+        );
+        // Re-caching the same key overwrites, not duplicates (idempotent).
+        store
+            .cache_oplogs("f1".into(), vec![cache(1, b"one")])
+            .unwrap();
+        assert_eq!(store.list_oplogs("f1".into()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn commit_truncation_drops_cached_rows_from_cache_oplogs() {
+        // A cached prefix (as load_entries would populate) is dropped by a
+        // later truncation exactly like locally-persisted oplogs.
+        let dir = TempDir::new().unwrap();
+        let store = store_at(&dir);
+        store
+            .cache_oplogs(
+                "f1".into(),
+                (1..=5u64).map(|s| cache(s, &[u8::try_from(s).unwrap()])).collect(),
+            )
+            .unwrap();
+        store.commit_truncation("f1".into(), 3).unwrap();
+        let remaining: Vec<u64> = store
+            .list_oplogs("f1".into())
+            .unwrap()
+            .into_iter()
+            .map(|e| e.sequence)
+            .collect();
+        assert_eq!(remaining, vec![4, 5]);
     }
 }

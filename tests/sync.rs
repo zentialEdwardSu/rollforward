@@ -73,6 +73,35 @@ fn shared_remote() -> (TempDir, Arc<dyn RemoteStorage>) {
     (dir, remote)
 }
 
+/// The set of chunk hashes physically resolvable on the remote, unioned across
+/// every pack index. Replaces the old `list_chunks()` for chunk-liveness
+/// assertions now that chunks live inside packs.
+fn stored_chunks(remote: &Arc<dyn RemoteStorage>) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    for index_id in remote.list_pack_indexes().unwrap() {
+        let bytes = remote.get_pack_index(index_id).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for c in v["chunks"].as_array().unwrap() {
+            set.insert(c["hash"].as_str().unwrap().to_string());
+        }
+    }
+    set
+}
+
+/// Total chunk bytes physically stored across all packs (sum of every packed
+/// chunk's length). Repack reclaims dead bytes, so this shrinks after GC.
+fn stored_pack_bytes(remote: &Arc<dyn RemoteStorage>) -> u64 {
+    let mut total = 0;
+    for index_id in remote.list_pack_indexes().unwrap() {
+        let bytes = remote.get_pack_index(index_id).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for c in v["chunks"].as_array().unwrap() {
+            total += c["length"].as_u64().unwrap();
+        }
+    }
+    total
+}
+
 /// Serialize an entry the way the engine does, for direct fork injection.
 fn entry_bytes(entry: &OpLogEntry) -> Vec<u8> {
     serde_json::to_vec(entry).unwrap()
@@ -184,20 +213,22 @@ fn binary_chunks_gc_after_truncation() {
             .collect();
         a.modify_binary("blob".into(), data).unwrap();
     }
-    let before = remote.list_chunks().unwrap().len();
+    let before = stored_chunks(&remote).len();
     a.truncate("blob".into(), 1).unwrap();
-    let after = remote.list_chunks().unwrap().len();
+    let after = stored_chunks(&remote).len();
     assert!(
         after < before,
-        "orphaned chunks should be GC'd ({before} -> {after})"
+        "chunks in fully-dead packs should be GC'd ({before} -> {after})"
     );
 
-    // Current manifest's chunks must all still be present.
+    // Current manifest's chunks must all still be resolvable, and the file must
+    // reassemble byte-identically from the surviving packs.
     let manifest = a.get_manifest("blob".into()).unwrap();
-    let stored = remote.list_chunks().unwrap();
+    let stored = stored_chunks(&remote);
     for h in &manifest {
         assert!(stored.contains(h), "live chunk {h} must survive GC");
     }
+    assert!(a.read_binary("blob".into()).is_ok(), "blob still readable");
 }
 
 #[test]
@@ -272,6 +303,9 @@ impl FaultRemote {
 }
 
 impl RemoteStorage for FaultRemote {
+    fn list_files(&self) -> Result<Vec<String>, SyncError> {
+        self.inner.list_files()
+    }
     fn list_oplogs(&self, file_id: String) -> Result<Vec<RemoteLogItem>, SyncError> {
         self.inner.list_oplogs(file_id)
     }
@@ -300,17 +334,117 @@ impl RemoteStorage for FaultRemote {
     fn delete_oplog(&self, file_id: String, remote_path: String) -> Result<(), SyncError> {
         self.inner.delete_oplog(file_id, remote_path)
     }
-    fn put_chunk(&self, hash: String, data: Vec<u8>) -> Result<(), SyncError> {
-        self.inner.put_chunk(hash, data)
+    fn put_pack(&self, pack_id: String, data: Vec<u8>) -> Result<(), SyncError> {
+        self.inner.put_pack(pack_id, data)
     }
-    fn get_chunk(&self, hash: String) -> Result<Vec<u8>, SyncError> {
-        self.inner.get_chunk(hash)
+    fn get_pack_range(&self, pack_id: String, offset: u64, length: u32) -> Result<Vec<u8>, SyncError> {
+        self.inner.get_pack_range(pack_id, offset, length)
     }
-    fn delete_chunk(&self, hash: String) -> Result<(), SyncError> {
-        self.inner.delete_chunk(hash)
+    fn list_packs(&self) -> Result<Vec<String>, SyncError> {
+        self.inner.list_packs()
     }
-    fn list_chunks(&self) -> Result<Vec<String>, SyncError> {
-        self.inner.list_chunks()
+    fn delete_pack(&self, pack_id: String) -> Result<(), SyncError> {
+        self.inner.delete_pack(pack_id)
+    }
+    fn put_pack_index(&self, index_id: String, data: Vec<u8>) -> Result<(), SyncError> {
+        self.inner.put_pack_index(index_id, data)
+    }
+    fn get_pack_index(&self, index_id: String) -> Result<Vec<u8>, SyncError> {
+        self.inner.get_pack_index(index_id)
+    }
+    fn list_pack_indexes(&self) -> Result<Vec<String>, SyncError> {
+        self.inner.list_pack_indexes()
+    }
+    fn delete_pack_index(&self, index_id: String) -> Result<(), SyncError> {
+        self.inner.delete_pack_index(index_id)
+    }
+    fn put_baseline(&self, file_id: String, seq: u64, data: Vec<u8>) -> Result<(), SyncError> {
+        self.inner.put_baseline(file_id, seq, data)
+    }
+    fn get_baseline(&self, file_id: String, seq: u64) -> Result<Option<Vec<u8>>, SyncError> {
+        self.inner.get_baseline(file_id, seq)
+    }
+    fn list_baselines(&self, file_id: String) -> Result<Vec<u64>, SyncError> {
+        self.inner.list_baselines(file_id)
+    }
+    fn put_status(&self, client_id: String, last: u64) -> Result<(), SyncError> {
+        self.inner.put_status(client_id, last)
+    }
+    fn list_statuses(&self) -> Result<Vec<ClientStatus>, SyncError> {
+        self.inner.list_statuses()
+    }
+}
+
+/// A remote that counts `get_oplog` calls, to assert the incremental-read
+/// optimization (B1): a sync must not re-fetch oplog objects already served
+/// from the local redb cache.
+struct CountingRemote {
+    /// The real backend everything delegates to.
+    inner: LocalFolderRemote,
+    /// Number of `get_oplog` calls observed.
+    oplog_gets: AtomicU32,
+}
+
+impl CountingRemote {
+    fn new(root: &std::path::Path) -> Self {
+        Self {
+            inner: LocalFolderRemote::new(root).unwrap(),
+            oplog_gets: AtomicU32::new(0),
+        }
+    }
+    /// Read and reset the `get_oplog` counter.
+    fn take_gets(&self) -> u32 {
+        self.oplog_gets.swap(0, Ordering::SeqCst)
+    }
+    /// Convenience: list oplog items directly off the inner backend.
+    fn inner_list(&self, file_id: &str) -> Vec<RemoteLogItem> {
+        self.inner.list_oplogs(file_id.to_owned()).unwrap()
+    }
+}
+
+impl RemoteStorage for CountingRemote {
+    fn list_files(&self) -> Result<Vec<String>, SyncError> {
+        self.inner.list_files()
+    }
+    fn list_oplogs(&self, file_id: String) -> Result<Vec<RemoteLogItem>, SyncError> {
+        self.inner.list_oplogs(file_id)
+    }
+    fn put_oplog(&self, file_id: String, entry: OpLogEntry) -> Result<(), SyncError> {
+        self.inner.put_oplog(file_id, entry)
+    }
+    fn put_oplog_cas(&self, file_id: String, entry: OpLogEntry) -> Result<(), SyncError> {
+        self.inner.put_oplog_cas(file_id, entry)
+    }
+    fn get_oplog(&self, file_id: String, remote_path: String) -> Result<Vec<u8>, SyncError> {
+        self.oplog_gets.fetch_add(1, Ordering::SeqCst);
+        self.inner.get_oplog(file_id, remote_path)
+    }
+    fn delete_oplog(&self, file_id: String, remote_path: String) -> Result<(), SyncError> {
+        self.inner.delete_oplog(file_id, remote_path)
+    }
+    fn put_pack(&self, pack_id: String, data: Vec<u8>) -> Result<(), SyncError> {
+        self.inner.put_pack(pack_id, data)
+    }
+    fn get_pack_range(&self, pack_id: String, offset: u64, length: u32) -> Result<Vec<u8>, SyncError> {
+        self.inner.get_pack_range(pack_id, offset, length)
+    }
+    fn list_packs(&self) -> Result<Vec<String>, SyncError> {
+        self.inner.list_packs()
+    }
+    fn delete_pack(&self, pack_id: String) -> Result<(), SyncError> {
+        self.inner.delete_pack(pack_id)
+    }
+    fn put_pack_index(&self, index_id: String, data: Vec<u8>) -> Result<(), SyncError> {
+        self.inner.put_pack_index(index_id, data)
+    }
+    fn get_pack_index(&self, index_id: String) -> Result<Vec<u8>, SyncError> {
+        self.inner.get_pack_index(index_id)
+    }
+    fn list_pack_indexes(&self) -> Result<Vec<String>, SyncError> {
+        self.inner.list_pack_indexes()
+    }
+    fn delete_pack_index(&self, index_id: String) -> Result<(), SyncError> {
+        self.inner.delete_pack_index(index_id)
     }
     fn put_baseline(&self, file_id: String, seq: u64, data: Vec<u8>) -> Result<(), SyncError> {
         self.inner.put_baseline(file_id, seq, data)
@@ -364,9 +498,6 @@ impl LocalStore for FailingStore {
     fn get_sync_cursor(&self, file_id: String) -> Result<Option<u64>, SyncError> {
         self.inner.get_sync_cursor(file_id)
     }
-    fn is_chunk_done(&self, hash: String) -> Result<bool, SyncError> {
-        self.inner.is_chunk_done(hash)
-    }
     fn persist_file(
         &self,
         file_id: String,
@@ -383,8 +514,12 @@ impl LocalStore for FailingStore {
         }
         self.inner.persist_file(file_id, state, head, cache_entry)
     }
-    fn mark_chunk_done(&self, hash: String) -> Result<(), SyncError> {
-        self.inner.mark_chunk_done(hash)
+    fn cache_oplogs(
+        &self,
+        file_id: String,
+        entries: Vec<OplogCacheEntry>,
+    ) -> Result<(), SyncError> {
+        self.inner.cache_oplogs(file_id, entries)
     }
     fn commit_truncation(&self, file_id: String, up_to: u64) -> Result<(), SyncError> {
         self.inner.commit_truncation(file_id, up_to)
@@ -430,27 +565,33 @@ fn mid_sync_failure_leaves_local_state_untouched() {
 }
 
 #[test]
-fn chunk_upload_resumes_after_interruption() {
-    // Two versions sharing leading chunks; the second modify reuses done-marked
-    // chunks. We assert that re-uploading identical content skips work by
-    // observing that already-present chunks are not re-put (idempotent remote +
-    // CHUNK_XFER skip). Here we verify the resume table is honored: after a
-    // first upload, a second modify_binary with overlapping content does not
-    // error and produces a manifest whose shared chunks already exist remotely.
+fn pack_upload_dedupes_identical_content() {
+    // Pack-level analogue of chunk resume/dedup: re-writing identical content
+    // must not create new pack objects. Dedup is decided against the union pack
+    // index (content-addressed), so a second modify_binary of the same bytes
+    // finds every chunk already stored and builds zero new packs. This is also
+    // what makes an interrupted upload safe to resume — already-stored chunks
+    // are never re-packed.
     let (_remote_dir, remote) = shared_remote();
     let dbs = TempDir::new().unwrap();
     let (a, _) = engine("clientA", &dbs, remote.clone());
 
     let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
     a.modify_binary("blob".into(), data.clone()).unwrap();
-    let stored_after_first = remote.list_chunks().unwrap().len();
+    let packs_after_first = remote.list_packs().unwrap();
+    let indexes_after_first = remote.list_pack_indexes().unwrap();
 
-    // Re-writing the same content: every chunk is already done -> no new chunks.
+    // Re-writing the same content: every chunk already stored -> no new packs.
     a.modify_binary("blob".into(), data).unwrap();
-    let stored_after_second = remote.list_chunks().unwrap().len();
     assert_eq!(
-        stored_after_first, stored_after_second,
-        "identical content must not create new chunks (resume/dedup honored)"
+        packs_after_first,
+        remote.list_packs().unwrap(),
+        "identical content must not create new packs (dedup honored)"
+    );
+    assert_eq!(
+        indexes_after_first,
+        remote.list_pack_indexes().unwrap(),
+        "identical content must not create new pack indexes"
     );
 }
 
@@ -624,24 +765,35 @@ fn pseudo_bytes(len: usize, seed: u64) -> Vec<u8> {
 }
 
 /// BI-201: syncing a new multi-MB file produces a full manifest and uploads
-/// every chunk to the remote.
+/// every chunk (packed) to the remote. Also the write-amplification intent of
+/// the pack workstream: many chunks collapse into a handful of pack objects
+/// (≈ size / `TARGET_PACK_SIZE`), not one object per chunk.
 #[test]
 fn bi201_new_large_file_full_manifest() {
     let (_remote_dir, remote) = shared_remote();
     let dbs = TempDir::new().unwrap();
     let (a, _) = engine("clientA", &dbs, remote.clone());
 
-    // ~2 MB (scaled from the doc's 500 MB) — enough for many chunks.
-    let data = pseudo_bytes(2 * 1024 * 1024, 1);
+    // ~10 MB — enough for many chunks spanning multiple 4 MiB packs.
+    let data = pseudo_bytes(10 * 1024 * 1024, 1);
     a.modify_binary("blob".into(), data.clone()).unwrap();
 
     let manifest = a.get_manifest("blob".into()).unwrap();
     assert!(manifest.len() > 1, "multi-chunk manifest");
-    // Every chunk in the manifest is present on the remote.
-    let stored = remote.list_chunks().unwrap();
+    // Every chunk in the manifest is resolvable on the remote (packed).
+    let stored = stored_chunks(&remote);
     for h in &manifest {
         assert!(stored.contains(h), "chunk {h} uploaded");
     }
+    // Write amplification: hundreds of chunks collapse into a few pack objects.
+    let packs = remote.list_packs().unwrap().len();
+    assert!(
+        packs <= 4 && packs * 10 < manifest.len(),
+        "expected few packs (<= 4), got {packs} for {} chunks",
+        manifest.len()
+    );
+    // The packed file round-trips byte-identically via engine reassembly.
+    assert_eq!(a.read_binary("blob".into()).unwrap(), data);
 }
 
 /// Build a binary snapshot entry at `seq` from `client` referencing `hashes`.
@@ -931,14 +1083,14 @@ fn log404_binary_rollback_is_pointer_only() {
     a.modify_binary("blob".into(), pseudo_bytes(90_000, 300))
         .unwrap();
 
-    let chunks_before = remote.list_chunks().unwrap().len();
+    let packs_before = remote.list_packs().unwrap().len();
     // Roll back to v1: pointer swap only.
     a.rollback("blob".into(), v1).unwrap();
-    let chunks_after = remote.list_chunks().unwrap().len();
+    let packs_after = remote.list_packs().unwrap().len();
 
     assert_eq!(
-        chunks_before, chunks_after,
-        "rollback must not upload/copy chunks"
+        packs_before, packs_after,
+        "rollback must not upload/copy packs"
     );
     assert_eq!(
         a.get_manifest("blob".into()).unwrap(),
@@ -1123,7 +1275,8 @@ fn tru602_lagging_client_protection() {
 }
 
 /// TRU-603: after truncation, chunks referenced by no surviving manifest are
-/// physically deleted; chunks still referenced survive.
+/// physically reclaimed (their fully-dead packs deleted); chunks still
+/// referenced survive and the file still reassembles.
 #[test]
 fn tru603_binary_gc_deletes_only_orphans() {
     let (_remote_dir, remote) = shared_remote();
@@ -1134,16 +1287,154 @@ fn tru603_binary_gc_deletes_only_orphans() {
         a.modify_binary("blob".into(), pseudo_bytes(120_000, v + 1))
             .unwrap();
     }
-    let before = remote.list_chunks().unwrap().len();
+    let before = stored_chunks(&remote).len();
     a.truncate("blob".into(), 1).unwrap();
-    let after = remote.list_chunks().unwrap().len();
+    let after = stored_chunks(&remote).len();
     assert!(after < before, "orphans GC'd ({before} -> {after})");
 
-    // Surviving manifest chunks are all still present.
+    // Surviving manifest chunks are all still resolvable, and the file reads back.
     let manifest = a.get_manifest("blob".into()).unwrap();
-    let stored = remote.list_chunks().unwrap();
+    let stored = stored_chunks(&remote);
     for h in &manifest {
         assert!(stored.contains(h), "live chunk {h} survives GC");
+    }
+    assert!(a.read_binary("blob".into()).is_ok(), "blob still readable");
+}
+
+/// TRU-605 (A2): a pack that ends up mostly dead after truncation is *repacked*
+/// — its surviving chunks rewritten into a fresh pack and its dead bytes
+/// reclaimed — while the file still reassembles byte-identically. Constructed so
+/// one pack holds a live shared prefix plus a large dead tail (> 50% dead).
+#[test]
+fn tru605_mostly_dead_pack_is_repacked() {
+    let (_remote_dir, remote) = shared_remote();
+    let dbs = TempDir::new().unwrap();
+    let (a, _) = engine("clientA", &dbs, remote.clone());
+
+    // v1 = small shared prefix + large tail. CDC keeps the prefix chunks stable.
+    let prefix = pseudo_bytes(80 * 1024, 7);
+    let mut v1 = prefix.clone();
+    v1.extend(pseudo_bytes(400 * 1024, 11));
+    a.modify_binary("blob".into(), v1).unwrap();
+
+    // v2 = same prefix + a different large tail. The prefix chunks dedupe (stay
+    // live); v1's tail chunks become dead. v1's pack is now mostly dead.
+    let mut v2 = prefix.clone();
+    v2.extend(pseudo_bytes(400 * 1024, 23));
+    a.modify_binary("blob".into(), v2.clone()).unwrap();
+
+    let bytes_before = stored_pack_bytes(&remote);
+    // Keep the newest version; v1's snapshot is superseded so its tail dies.
+    a.truncate("blob".into(), 1).unwrap();
+    let bytes_after = stored_pack_bytes(&remote);
+
+    // Repack reclaimed the dead tail bytes: strictly fewer stored bytes, and no
+    // more than the surviving content plus modest packing slack.
+    assert!(
+        bytes_after < bytes_before,
+        "repack must reclaim dead bytes ({bytes_before} -> {bytes_after})"
+    );
+
+    // Every surviving-manifest chunk is still resolvable, and v2 reassembles
+    // byte-identically from the repacked storage — including on a fresh client.
+    let manifest = a.get_manifest("blob".into()).unwrap();
+    let stored = stored_chunks(&remote);
+    for h in &manifest {
+        assert!(stored.contains(h), "live chunk {h} resolvable after repack");
+    }
+    assert_eq!(a.read_binary("blob".into()).unwrap(), v2, "local read intact");
+
+    let dbs_b = TempDir::new().unwrap();
+    let (b, _) = engine("clientB", &dbs_b, remote.clone());
+    b.sync("blob".into()).unwrap();
+    assert_eq!(
+        b.read_binary("blob".into()).unwrap(),
+        v2,
+        "fresh client reassembles from repacked storage"
+    );
+}
+
+/// TRU-606: binary GC is global across files. Packs are one shared content-
+/// addressed namespace, so truncating one file must NOT delete packs holding
+/// another file's live chunks. Regression for the cross-file data-loss bug where
+/// the live set was built from only the truncated file's manifests.
+#[test]
+fn tru606_gc_spares_other_files_packs() {
+    let (_remote_dir, remote) = shared_remote();
+    let dbs = TempDir::new().unwrap();
+    let (a, _) = engine("clientA", &dbs, remote.clone());
+
+    // Two independent binary files with disjoint content on the same remote.
+    // "keep" gets a single version (all its chunks stay live); "churn" is
+    // rewritten repeatedly so most of its chunks go dead and it triggers GC.
+    let keep_data = pseudo_bytes(300_000, 42);
+    a.modify_binary("keep".into(), keep_data.clone()).unwrap();
+    for v in 0..6u64 {
+        a.modify_binary("churn".into(), pseudo_bytes(120_000, v + 100))
+            .unwrap();
+    }
+
+    // Truncating "churn" GC's the store. The old code, building `live` from only
+    // "churn", would delete every pack holding "keep"'s chunks.
+    a.truncate("churn".into(), 1).unwrap();
+
+    // "keep" is fully intact: every manifest chunk resolvable and bytes identical.
+    let stored = stored_chunks(&remote);
+    for h in &a.get_manifest("keep".into()).unwrap() {
+        assert!(stored.contains(h), "keep's live chunk {h} survives churn GC");
+    }
+    assert_eq!(
+        a.read_binary("keep".into()).unwrap(),
+        keep_data,
+        "untouched file reads back byte-identically after another file's GC"
+    );
+
+    // A fresh client with no local state reassembles "keep" purely from remote.
+    let dbs_b = TempDir::new().unwrap();
+    let (b, _) = engine("clientB", &dbs_b, remote.clone());
+    b.sync("keep".into()).unwrap();
+    assert_eq!(
+        b.read_binary("keep".into()).unwrap(),
+        keep_data,
+        "fresh client still reassembles the spared file"
+    );
+}
+
+/// INTEG-1: verify-on-read. Chunks are content-addressed, so a pack corrupted
+/// or truncated in storage/transit must be caught on read — not silently
+/// reassembled into wrong bytes. Flip one byte of a stored pack and assert
+/// `read_binary` fails loudly with `Corrupt`, naming the offending chunk.
+#[test]
+fn integ1_corrupt_pack_is_detected_on_read() {
+    let (remote_dir, remote) = shared_remote();
+    let dbs = TempDir::new().unwrap();
+    let (a, _) = engine("clientA", &dbs, remote.clone());
+
+    let data = pseudo_bytes(200_000, 7);
+    a.modify_binary("blob".into(), data.clone()).unwrap();
+    // Sanity: reads back cleanly before corruption.
+    assert_eq!(a.read_binary("blob".into()).unwrap(), data);
+
+    // Flip a byte inside a stored pack (pack files are raw concatenated chunk
+    // bytes, so any data byte belongs to a manifest chunk this file reads).
+    let pack_dir = remote_dir.path().join("packs");
+    let pack = std::fs::read_dir(&pack_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut bytes = std::fs::read(&pack).unwrap();
+    bytes[0] ^= 0xFF;
+    std::fs::write(&pack, &bytes).unwrap();
+
+    // A fresh client (no cached bytes) forces the read to hit the corrupt pack.
+    let dbs_b = TempDir::new().unwrap();
+    let (b, _) = engine("clientB", &dbs_b, remote.clone());
+    b.sync("blob".into()).unwrap();
+    match b.read_binary("blob".into()) {
+        Err(SyncError::Corrupt { hash }) => assert!(!hash.is_empty()),
+        other => panic!("expected Corrupt, got {other:?}"),
     }
 }
 
@@ -1313,5 +1604,156 @@ fn err704_auth_expired_surfaces_and_unlocks() {
     assert!(
         !victim.is_syncing("doc".into()),
         "phase lock cleared so the host can retry after re-login"
+    );
+}
+
+// ======================================================================
+// 8. Incremental oplog reads (B1) — the local cache must eliminate
+//    repeat GETs of oplog objects already fetched.
+// ======================================================================
+
+/// Build an engine over a shared `CountingRemote`, returning the counter too.
+fn counting_engine(
+    client: &str,
+    dir: &TempDir,
+    remote: Arc<CountingRemote>,
+) -> Arc<SyncEngine> {
+    let rec = Arc::new(Recorder::default());
+    let db = dir.path().join(format!("{client}.redb"));
+    let store = Arc::new(RedbStore::open(db).unwrap());
+    let dyn_remote: Arc<dyn RemoteStorage> = remote;
+    Arc::new(SyncEngine::with_backends(
+        client,
+        store,
+        dyn_remote,
+        rec,
+        BinaryConflictPolicy::KeepBoth,
+    ))
+}
+
+/// B1-801: a second sync with no new remote entries issues **zero** `get_oplog`
+/// calls — everything is served from the warm local cache. This is the intent
+/// test for the whole workstream: it fails if incremental reads regress to N+1.
+#[test]
+fn b1_801_resync_without_new_entries_fetches_nothing() {
+    let remote_dir = TempDir::new().unwrap();
+    // Seed 10 entries via a plain engine so they exist on the remote.
+    {
+        let plain: Arc<dyn RemoteStorage> =
+            Arc::new(LocalFolderRemote::new(remote_dir.path()).unwrap());
+        let dbs = TempDir::new().unwrap();
+        let (seed, _) = engine("seed", &dbs, plain);
+        for i in 1..=10 {
+            seed.modify_text("doc".into(), format!("state-{i}")).unwrap();
+        }
+    }
+
+    let counting = Arc::new(CountingRemote::new(remote_dir.path()));
+    let dbs = TempDir::new().unwrap();
+    let b = counting_engine("clientB", &dbs, counting.clone());
+
+    // First sync fetches all 10 (cold cache).
+    b.sync("doc".into()).unwrap();
+    assert_eq!(counting.take_gets(), 10, "cold sync fetches every entry");
+
+    // Second sync: nothing new on the remote, cache is warm -> no GETs.
+    b.sync("doc".into()).unwrap();
+    assert_eq!(
+        counting.take_gets(),
+        0,
+        "warm resync must not re-fetch cached oplogs"
+    );
+}
+
+/// B1-802: after a warm cache, only entries above the cache are fetched.
+#[test]
+fn b1_802_incremental_fetch_only_new_entries() {
+    let remote_dir = TempDir::new().unwrap();
+    let counting = Arc::new(CountingRemote::new(remote_dir.path()));
+    // Writer shares the same remote (via a second handle) so we can add entries.
+    let writer_remote: Arc<dyn RemoteStorage> =
+        Arc::new(LocalFolderRemote::new(remote_dir.path()).unwrap());
+    let wdirs = TempDir::new().unwrap();
+    let (writer, _) = engine("writer", &wdirs, writer_remote);
+    for i in 1..=5 {
+        writer.modify_text("doc".into(), format!("v{i}")).unwrap();
+    }
+
+    let dbs = TempDir::new().unwrap();
+    let b = counting_engine("clientB", &dbs, counting.clone());
+    b.sync("doc".into()).unwrap();
+    assert_eq!(counting.take_gets(), 5, "cold sync fetches all five");
+
+    // Writer appends one more entry; reader should fetch exactly one.
+    writer.modify_text("doc".into(), "v6".into()).unwrap();
+    b.sync("doc".into()).unwrap();
+    assert_eq!(
+        counting.take_gets(),
+        1,
+        "only the one new entry is fetched"
+    );
+}
+
+/// B1-803: a fork injected at an already-cached sequence is still detected and
+/// merged — the forked sequence is always re-fetched, never masked by the
+/// single-slot cache.
+#[test]
+fn b1_803_fork_at_cached_sequence_still_detected() {
+    let remote_dir = TempDir::new().unwrap();
+    let counting = Arc::new(CountingRemote::new(remote_dir.path()));
+    let dbs = TempDir::new().unwrap();
+    let a = counting_engine("clientA", &dbs, counting.clone());
+
+    // clientA publishes a real v1 and caches it.
+    a.modify_text("doc".into(), "hello".into()).unwrap();
+    a.sync("doc".into()).unwrap();
+    counting.take_gets();
+
+    // Inject clientB's competing v1 (a genuine fork on the dumb remote).
+    let mut b_entry = real_text_entry("clientB", "world");
+    b_entry.sequence = 1;
+    let injector: Arc<dyn RemoteStorage> =
+        Arc::new(LocalFolderRemote::new(remote_dir.path()).unwrap());
+    injector.put_oplog("doc".into(), b_entry).unwrap();
+
+    // Sync must detect the fork (re-fetch seq 1 despite it being cached) and
+    // reconverge to a single tip.
+    a.sync("doc".into()).unwrap();
+    let items = counting.inner_list("doc");
+    let max_seq = items.iter().map(|i| i.sequence).max().unwrap();
+    let tip_count = items.iter().filter(|i| i.sequence == max_seq).count();
+    assert_eq!(tip_count, 1, "fork reconverged to a single unifying tip");
+    assert!(max_seq >= 2, "a unifying entry was published above the fork");
+}
+
+/// B1-804: cache rows left stale by another client's remote truncation are
+/// inert — a client with a warm (pre-truncation) cache still rebuilds correct
+/// current content from baseline + surviving oplogs, never replaying dead
+/// history.
+#[test]
+fn b1_804_stale_cache_after_remote_truncation_is_inert() {
+    let (_remote_dir, remote) = shared_remote();
+    let dbs = TempDir::new().unwrap();
+    let (a, _) = engine("clientA", &dbs, remote.clone());
+    let (b, _) = engine("clientB", &dbs, remote.clone());
+
+    // A drives 15 versions; B syncs and warms its cache over all of them.
+    let mut text = String::new();
+    for i in 1..=15 {
+        writeln!(text, "l{i}").unwrap();
+        a.modify_text("doc".into(), text.clone()).unwrap();
+    }
+    b.sync("doc".into()).unwrap();
+
+    // A truncates on the remote (keep newest 3 -> cut at 12), dropping loose
+    // oplogs <= 12. B's local cache still holds rows 1..=12 (now dead).
+    a.truncate("doc".into(), 3).unwrap();
+
+    // B syncs again: the stale cached rows must not corrupt the rebuild.
+    b.sync("doc".into()).unwrap();
+    assert_eq!(
+        b.get_text("doc".into()).unwrap(),
+        text,
+        "current content rebuilt despite stale cache rows below the cut"
     );
 }

@@ -11,7 +11,10 @@
 //! both changed the content, it is a genuine conflict resolved per
 //! [`BinaryConflictPolicy`].
 
+use std::collections::HashSet;
+
 use fastcdc::v2020::FastCDC;
+use serde::{Deserialize, Serialize};
 
 use crate::types::{BinaryConflictPolicy, ChunkInfo};
 
@@ -21,6 +24,78 @@ const MIN_SIZE: usize = 4 * 1024;
 const AVG_SIZE: usize = 16 * 1024;
 /// Maximum chunk size (bytes).
 const MAX_SIZE: usize = 64 * 1024;
+
+/// Target size for a pack object (bytes). New chunks are concatenated into
+/// packs up to this size before being flushed, so one binary write produces a
+/// handful of pack objects instead of thousands of per-chunk objects. A pack
+/// may exceed this only when a single chunk is larger (chunks are ≤ `MAX_SIZE`,
+/// well under this target, so in practice packs land just over the target).
+pub const TARGET_PACK_SIZE: usize = 4 * 1024 * 1024;
+
+/// Where a chunk lives inside a pack object: a byte range `[offset, offset+length)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackedChunk {
+    /// blake3 hash of the chunk (its content address).
+    pub hash: String,
+    /// Byte offset of the chunk within the pack.
+    pub offset: u64,
+    /// Chunk length in bytes.
+    pub length: u32,
+}
+
+/// The index for one pack object: the chunks it contains and where. Stored as a
+/// sibling object (`index_id == pack_id`); readers union every pack index to
+/// resolve `hash -> (pack_id, offset, length)`. Immutable and content-addressed,
+/// so concurrent writers need no coordination — identical content yields an
+/// identical pack id and an idempotent index write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackIndex {
+    /// blake3 hash of the whole pack object (its content address / id).
+    pub pack_id: String,
+    /// The chunks packed into this object, in storage order.
+    pub chunks: Vec<PackedChunk>,
+}
+
+/// Group `new_chunks` into pack objects of up to [`TARGET_PACK_SIZE`] bytes.
+/// Returns each pack's `(pack_id, pack_bytes, index)` ready to upload. Callers
+/// pass only chunks not already stored remotely (dedup is decided against the
+/// union pack index before calling this). A chunk appearing twice in the input
+/// is packed once (its first occurrence).
+pub fn build_packs(new_chunks: &[(ChunkInfo, Vec<u8>)]) -> Vec<(String, Vec<u8>, PackIndex)> {
+    let mut packs = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunks: Vec<PackedChunk> = Vec::new();
+
+    for (info, bytes) in new_chunks {
+        if !seen.insert(info.hash.as_str()) {
+            continue; // duplicate within this batch — pack once
+        }
+        chunks.push(PackedChunk {
+            hash: info.hash.clone(),
+            offset: buf.len() as u64,
+            length: u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+        });
+        buf.extend_from_slice(bytes);
+        if buf.len() >= TARGET_PACK_SIZE {
+            packs.push(seal_pack(std::mem::take(&mut buf), std::mem::take(&mut chunks)));
+        }
+    }
+    if !buf.is_empty() {
+        packs.push(seal_pack(buf, chunks));
+    }
+    packs
+}
+
+/// Finalize one pack: content-address it and stamp the id into its index.
+fn seal_pack(buf: Vec<u8>, chunks: Vec<PackedChunk>) -> (String, Vec<u8>, PackIndex) {
+    let pack_id = blake3::hash(&buf).to_hex().to_string();
+    let index = PackIndex {
+        pack_id: pack_id.clone(),
+        chunks,
+    };
+    (pack_id, buf, index)
+}
 
 /// Slice `data` into content-defined chunks and hash each with blake3.
 /// Deterministic: the same bytes always yield the same manifest.
@@ -48,8 +123,18 @@ pub fn manifest(data: &[u8]) -> Vec<String> {
     chunk_data(data).into_iter().map(|(c, _)| c.hash).collect()
 }
 
+/// Whether `bytes` hash to their claimed content-address `expected_hash`.
+/// Chunks are addressed by blake3, so a mismatch means the bytes were corrupted
+/// or truncated in storage or in transit — always detectable on read. Callers
+/// verify every fetched chunk before trusting it (see `read_binary`, repack).
+#[must_use]
+pub fn verify_chunk(expected_hash: &str, bytes: &[u8]) -> bool {
+    blake3::hash(bytes).to_hex().to_string() == expected_hash
+}
+
 /// Reassemble file bytes from an ordered manifest, given a chunk fetcher.
-/// The fetcher returns the bytes for a hash (e.g. `remote.get_chunk`).
+/// The fetcher returns the bytes for a hash (e.g. a pack range read resolved
+/// through the union pack index).
 pub fn reassemble<F, E>(manifest: &[String], mut fetch: F) -> Result<Vec<u8>, E>
 where
     F: FnMut(&str) -> Result<Vec<u8>, E>,
@@ -122,17 +207,67 @@ pub fn merge_manifests(
     }
 }
 
-/// Given the set of live manifests and every stored chunk hash, return the
-/// orphaned hashes safe to garbage-collect (present in storage, referenced by
-/// no live manifest).
-pub fn orphaned_chunks(live_manifests: &[Vec<String>], stored: &[String]) -> Vec<String> {
-    use std::collections::HashSet;
-    let live: HashSet<&String> = live_manifests.iter().flatten().collect();
-    stored
-        .iter()
-        .filter(|h| !live.contains(h))
-        .cloned()
-        .collect()
+/// A pack exceeding this fraction of dead bytes is repacked; below it, the pack
+/// is kept as-is (its dead bytes reclaimed only once it crosses the threshold).
+/// The threshold trades reclaimed space against rewrite churn: repacking is a
+/// full read+rewrite of the surviving chunks, so we only pay it once a pack is
+/// mostly dead.
+pub const REPACK_DEAD_FRACTION: f64 = 0.5;
+
+/// What garbage collection should do with one pack, given which of its chunks
+/// are still referenced by a live manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackGc {
+    /// Every chunk is live (or the pack is empty) — leave it untouched.
+    Keep,
+    /// No chunk is live — delete the pack and its index outright.
+    Delete,
+    /// Some chunks are dead but not enough to cross [`REPACK_DEAD_FRACTION`] —
+    /// keep the pack; its dead bytes wait for a later, deader pass.
+    KeepMixed,
+    /// Dead bytes cross [`REPACK_DEAD_FRACTION`] — rewrite `live` (the surviving
+    /// chunk hashes, in pack order) into a fresh pack, then delete the old one.
+    Repack {
+        /// Surviving chunk hashes in their original pack order.
+        live: Vec<String>,
+    },
+}
+
+/// Classify a pack for GC from its chunks and the set of live chunk hashes.
+/// Pure: decides *what* to do; the engine performs the reads/writes/deletes.
+// Called once (by the truncate GC loop) but kept as a named, testable predicate
+// so the threshold policy is unit-tested without engine/remote plumbing.
+#[allow(clippy::single_call_fn)]
+pub fn classify_pack<S: std::hash::BuildHasher>(
+    chunks: &[PackedChunk],
+    live: &HashSet<String, S>,
+) -> PackGc {
+    let mut live_bytes: u64 = 0;
+    let mut dead_bytes: u64 = 0;
+    let mut live_hashes = Vec::new();
+    for c in chunks {
+        if live.contains(&c.hash) {
+            live_bytes += u64::from(c.length);
+            live_hashes.push(c.hash.clone());
+        } else {
+            dead_bytes += u64::from(c.length);
+        }
+    }
+    let total = live_bytes + dead_bytes;
+    if dead_bytes == 0 || total == 0 {
+        return PackGc::Keep;
+    }
+    if live_bytes == 0 {
+        return PackGc::Delete;
+    }
+    // dead_bytes / total >= REPACK_DEAD_FRACTION, without float division on the
+    // hot integers: compare cross-multiplied.
+    #[allow(clippy::cast_precision_loss)]
+    if dead_bytes as f64 >= total as f64 * REPACK_DEAD_FRACTION {
+        PackGc::Repack { live: live_hashes }
+    } else {
+        PackGc::KeepMixed
+    }
 }
 
 #[cfg(test)]
@@ -274,9 +409,121 @@ mod tests {
     }
 
     #[test]
-    fn gc_finds_only_orphans() {
-        let live = vec![vec!["a".to_string(), "b".to_string()]];
-        let stored = vec!["a".to_string(), "b".to_string(), "orphan".to_string()];
-        assert_eq!(orphaned_chunks(&live, &stored), vec!["orphan".to_string()]);
+    fn build_packs_groups_and_addresses() {
+        // Many small chunks group into few packs bounded by TARGET_PACK_SIZE.
+        let data = pseudo_random(TARGET_PACK_SIZE + 300_000);
+        let chunks = chunk_data(&data);
+        assert!(chunks.len() > 1);
+        let packs = build_packs(&chunks);
+        // At least two packs (data exceeds one target) and each within bounds
+        // (a pack may exceed the target by at most one final chunk ≤ MAX_SIZE).
+        assert!(packs.len() >= 2, "expected split, got {}", packs.len());
+        for (pack_id, bytes, index) in &packs {
+            assert!(bytes.len() <= TARGET_PACK_SIZE + MAX_SIZE);
+            assert_eq!(*pack_id, index.pack_id);
+            // Offsets/lengths locate each chunk's bytes exactly within the pack.
+            for c in &index.chunks {
+                let start = usize::try_from(c.offset).unwrap();
+                let slice = &bytes[start..start + c.length as usize];
+                assert_eq!(blake3::hash(slice).to_hex().to_string(), c.hash);
+            }
+        }
+    }
+
+    #[test]
+    fn build_packs_dedupes_within_batch() {
+        // The same chunk offered twice is packed once.
+        let one = chunk_data(&pseudo_random(20_000));
+        let mut doubled = one.clone();
+        doubled.extend(one.clone());
+        let packed: usize = build_packs(&doubled)
+            .iter()
+            .map(|(_, _, idx)| idx.chunks.len())
+            .sum();
+        let unique = one.len();
+        assert_eq!(packed, unique, "duplicates must be packed once");
+    }
+
+    #[test]
+    fn pack_index_serde_round_trips() {
+        let index = PackIndex {
+            pack_id: "pid".into(),
+            chunks: vec![PackedChunk {
+                hash: "h".into(),
+                offset: 7,
+                length: 42,
+            }],
+        };
+        let bytes = serde_json::to_vec(&index).unwrap();
+        let back: PackIndex = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(index, back);
+    }
+
+    /// A pack of the given per-chunk `(hash, length)` byte sizes.
+    fn pack_of(chunks: &[(&str, u32)]) -> Vec<PackedChunk> {
+        let mut offset = 0;
+        chunks
+            .iter()
+            .map(|(h, len)| {
+                let c = PackedChunk {
+                    hash: (*h).to_string(),
+                    offset,
+                    length: *len,
+                };
+                offset += u64::from(*len);
+                c
+            })
+            .collect()
+    }
+
+    fn live_set(hashes: &[&str]) -> HashSet<String> {
+        hashes.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn classify_keeps_all_live_and_empty_packs() {
+        let pack = pack_of(&[("a", 10), ("b", 10)]);
+        assert_eq!(classify_pack(&pack, &live_set(&["a", "b"])), PackGc::Keep);
+        assert_eq!(classify_pack(&[], &live_set(&[])), PackGc::Keep);
+    }
+
+    #[test]
+    fn classify_deletes_fully_dead_pack() {
+        let pack = pack_of(&[("a", 10), ("b", 10)]);
+        assert_eq!(classify_pack(&pack, &live_set(&["x"])), PackGc::Delete);
+    }
+
+    #[test]
+    fn classify_repacks_when_majority_dead() {
+        // 30 of 40 bytes dead (75%) -> repack, keeping only the live hash.
+        let pack = pack_of(&[("live", 10), ("dead1", 20), ("dead2", 10)]);
+        assert_eq!(
+            classify_pack(&pack, &live_set(&["live"])),
+            PackGc::Repack {
+                live: vec!["live".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn classify_keeps_mixed_when_mostly_live() {
+        // 10 of 40 bytes dead (25%) -> below threshold, keep mixed.
+        let pack = pack_of(&[("a", 15), ("b", 15), ("dead", 10)]);
+        assert_eq!(
+            classify_pack(&pack, &live_set(&["a", "b"])),
+            PackGc::KeepMixed
+        );
+    }
+
+    #[test]
+    fn classify_repacks_exactly_at_threshold() {
+        // Exactly 50% dead -> repack (threshold is inclusive).
+        let pack = pack_of(&[("live", 10), ("dead", 10)]);
+        assert_eq!(
+            classify_pack(&pack, &live_set(&["live"])),
+            PackGc::Repack {
+                live: vec!["live".to_string()]
+            }
+        );
     }
 }

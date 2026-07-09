@@ -716,31 +716,27 @@ static class _UniFFILib {
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceLocalStoreMethod5(
-        ulong @uniffiHandle,RustBuffer @hash,ref sbyte @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
-    );
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    public delegate void UniffiCallbackInterfaceLocalStoreMethod6(
         ulong @uniffiHandle,RustBuffer @fileId,RustBuffer @state,ulong @head,RustBuffer @cacheEntry,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    public delegate void UniffiCallbackInterfaceLocalStoreMethod7(
-        ulong @uniffiHandle,RustBuffer @hash,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+    public delegate void UniffiCallbackInterfaceLocalStoreMethod6(
+        ulong @uniffiHandle,RustBuffer @fileId,RustBuffer @entries,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    public delegate void UniffiCallbackInterfaceLocalStoreMethod8(
+    public delegate void UniffiCallbackInterfaceLocalStoreMethod7(
         ulong @uniffiHandle,RustBuffer @fileId,ulong @upTo,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    public delegate void UniffiCallbackInterfaceLocalStoreMethod9(
+    public delegate void UniffiCallbackInterfaceLocalStoreMethod8(
         ulong @uniffiHandle,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod0(
-        ulong @uniffiHandle,RustBuffer @fileId,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+        ulong @uniffiHandle,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod1(
-        ulong @uniffiHandle,RustBuffer @fileId,RustBuffer @entry,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+        ulong @uniffiHandle,RustBuffer @fileId,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod2(
@@ -748,23 +744,23 @@ static class _UniFFILib {
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod3(
-        ulong @uniffiHandle,RustBuffer @fileId,RustBuffer @remotePath,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+        ulong @uniffiHandle,RustBuffer @fileId,RustBuffer @entry,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod4(
-        ulong @uniffiHandle,RustBuffer @fileId,RustBuffer @remotePath,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+        ulong @uniffiHandle,RustBuffer @fileId,RustBuffer @remotePath,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod5(
-        ulong @uniffiHandle,RustBuffer @hash,RustBuffer @data,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+        ulong @uniffiHandle,RustBuffer @fileId,RustBuffer @remotePath,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod6(
-        ulong @uniffiHandle,RustBuffer @hash,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+        ulong @uniffiHandle,RustBuffer @packId,RustBuffer @data,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod7(
-        ulong @uniffiHandle,RustBuffer @hash,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+        ulong @uniffiHandle,RustBuffer @packId,ulong @offset,uint @length,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod8(
@@ -772,22 +768,42 @@ static class _UniFFILib {
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod9(
-        ulong @uniffiHandle,RustBuffer @fileId,ulong @seq,RustBuffer @data,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+        ulong @uniffiHandle,RustBuffer @packId,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod10(
-        ulong @uniffiHandle,RustBuffer @fileId,ulong @seq,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+        ulong @uniffiHandle,RustBuffer @indexId,RustBuffer @data,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod11(
-        ulong @uniffiHandle,RustBuffer @fileId,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+        ulong @uniffiHandle,RustBuffer @indexId,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod12(
-        ulong @uniffiHandle,RustBuffer @clientId,ulong @lastSyncedSequence,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+        ulong @uniffiHandle,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void UniffiCallbackInterfaceRemoteStorageMethod13(
+        ulong @uniffiHandle,RustBuffer @indexId,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+    );
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void UniffiCallbackInterfaceRemoteStorageMethod14(
+        ulong @uniffiHandle,RustBuffer @fileId,ulong @seq,RustBuffer @data,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+    );
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void UniffiCallbackInterfaceRemoteStorageMethod15(
+        ulong @uniffiHandle,RustBuffer @fileId,ulong @seq,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+    );
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void UniffiCallbackInterfaceRemoteStorageMethod16(
+        ulong @uniffiHandle,RustBuffer @fileId,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+    );
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void UniffiCallbackInterfaceRemoteStorageMethod17(
+        ulong @uniffiHandle,RustBuffer @clientId,ulong @lastSyncedSequence,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+    );
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void UniffiCallbackInterfaceRemoteStorageMethod18(
         ulong @uniffiHandle,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
     );
     [StructLayout(LayoutKind.Sequential)]
@@ -805,9 +821,8 @@ static class _UniFFILib {
         public IntPtr @listOplogs;
         public IntPtr @getBaselineMeta;
         public IntPtr @getSyncCursor;
-        public IntPtr @isChunkDone;
         public IntPtr @persistFile;
-        public IntPtr @markChunkDone;
+        public IntPtr @cacheOplogs;
         public IntPtr @commitTruncation;
         public IntPtr @close;
         public IntPtr @uniffiFree;
@@ -815,15 +830,20 @@ static class _UniFFILib {
     [StructLayout(LayoutKind.Sequential)]
     public struct UniffiVTableCallbackInterfaceRemoteStorage
     {
+        public IntPtr @listFiles;
         public IntPtr @listOplogs;
         public IntPtr @putOplog;
         public IntPtr @putOplogCas;
         public IntPtr @getOplog;
         public IntPtr @deleteOplog;
-        public IntPtr @putChunk;
-        public IntPtr @getChunk;
-        public IntPtr @deleteChunk;
-        public IntPtr @listChunks;
+        public IntPtr @putPack;
+        public IntPtr @getPackRange;
+        public IntPtr @listPacks;
+        public IntPtr @deletePack;
+        public IntPtr @putPackIndex;
+        public IntPtr @getPackIndex;
+        public IntPtr @listPackIndexes;
+        public IntPtr @deletePackIndex;
         public IntPtr @putBaseline;
         public IntPtr @getBaseline;
         public IntPtr @listBaselines;
@@ -831,6 +851,16 @@ static class _UniFFILib {
         public IntPtr @listStatuses;
         public IntPtr @uniffiFree;
     }
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     
     
     
@@ -1058,15 +1088,11 @@ static class _UniFFILib {
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern sbyte uniffi_rollforward_fn_method_localstore_is_chunk_done(IntPtr @ptr,RustBuffer @hash,ref UniffiRustCallStatus _uniffi_out_err
-    );
-
-    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern void uniffi_rollforward_fn_method_localstore_persist_file(IntPtr @ptr,RustBuffer @fileId,RustBuffer @state,ulong @head,RustBuffer @cacheEntry,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern void uniffi_rollforward_fn_method_localstore_mark_chunk_done(IntPtr @ptr,RustBuffer @hash,ref UniffiRustCallStatus _uniffi_out_err
+    public static extern void uniffi_rollforward_fn_method_localstore_cache_oplogs(IntPtr @ptr,RustBuffer @fileId,RustBuffer @entries,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
@@ -1098,6 +1124,10 @@ static class _UniFFILib {
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern RustBuffer uniffi_rollforward_fn_method_remotestorage_list_files(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern RustBuffer uniffi_rollforward_fn_method_remotestorage_list_oplogs(IntPtr @ptr,RustBuffer @fileId,ref UniffiRustCallStatus _uniffi_out_err
     );
 
@@ -1118,19 +1148,35 @@ static class _UniFFILib {
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern void uniffi_rollforward_fn_method_remotestorage_put_chunk(IntPtr @ptr,RustBuffer @hash,RustBuffer @data,ref UniffiRustCallStatus _uniffi_out_err
+    public static extern void uniffi_rollforward_fn_method_remotestorage_put_pack(IntPtr @ptr,RustBuffer @packId,RustBuffer @data,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern RustBuffer uniffi_rollforward_fn_method_remotestorage_get_chunk(IntPtr @ptr,RustBuffer @hash,ref UniffiRustCallStatus _uniffi_out_err
+    public static extern RustBuffer uniffi_rollforward_fn_method_remotestorage_get_pack_range(IntPtr @ptr,RustBuffer @packId,ulong @offset,uint @length,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern void uniffi_rollforward_fn_method_remotestorage_delete_chunk(IntPtr @ptr,RustBuffer @hash,ref UniffiRustCallStatus _uniffi_out_err
+    public static extern RustBuffer uniffi_rollforward_fn_method_remotestorage_list_packs(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern RustBuffer uniffi_rollforward_fn_method_remotestorage_list_chunks(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
+    public static extern void uniffi_rollforward_fn_method_remotestorage_delete_pack(IntPtr @ptr,RustBuffer @packId,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_rollforward_fn_method_remotestorage_put_pack_index(IntPtr @ptr,RustBuffer @indexId,RustBuffer @data,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern RustBuffer uniffi_rollforward_fn_method_remotestorage_get_pack_index(IntPtr @ptr,RustBuffer @indexId,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern RustBuffer uniffi_rollforward_fn_method_remotestorage_list_pack_indexes(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_rollforward_fn_method_remotestorage_delete_pack_index(IntPtr @ptr,RustBuffer @indexId,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
@@ -1191,6 +1237,10 @@ static class _UniFFILib {
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern void uniffi_rollforward_fn_method_syncengine_publish_convergence(IntPtr @ptr,RustBuffer @fileId,sbyte @isText,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern RustBuffer uniffi_rollforward_fn_method_syncengine_read_binary(IntPtr @ptr,RustBuffer @fileId,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
@@ -1498,15 +1548,11 @@ static class _UniFFILib {
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern ushort uniffi_rollforward_checksum_method_localstore_is_chunk_done(
-    );
-
-    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern ushort uniffi_rollforward_checksum_method_localstore_persist_file(
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern ushort uniffi_rollforward_checksum_method_localstore_mark_chunk_done(
+    public static extern ushort uniffi_rollforward_checksum_method_localstore_cache_oplogs(
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
@@ -1515,6 +1561,10 @@ static class _UniFFILib {
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern ushort uniffi_rollforward_checksum_method_localstore_close(
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_list_files(
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
@@ -1538,19 +1588,35 @@ static class _UniFFILib {
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_put_chunk(
+    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_put_pack(
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_get_chunk(
+    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_get_pack_range(
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_delete_chunk(
+    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_list_packs(
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
-    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_list_chunks(
+    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_delete_pack(
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_put_pack_index(
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_get_pack_index(
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_list_pack_indexes(
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_rollforward_checksum_method_remotestorage_delete_pack_index(
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
@@ -1603,6 +1669,10 @@ static class _UniFFILib {
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
     public static extern ushort uniffi_rollforward_checksum_method_syncengine_publish_convergence(
+    );
+
+    [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_rollforward_checksum_method_syncengine_read_binary(
     );
 
     [DllImport("rollforward", CallingConvention = CallingConvention.Cdecl)]
@@ -1704,117 +1774,141 @@ static class _UniFFILib {
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_localstore_is_chunk_done();
-            if (checksum != 10113) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_localstore_is_chunk_done` checksum `10113`, library returned `{checksum}`");
-            }
-        }
-        {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_localstore_persist_file();
-            if (checksum != 18179) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_localstore_persist_file` checksum `18179`, library returned `{checksum}`");
+            if (checksum != 10461) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_localstore_persist_file` checksum `10461`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_localstore_mark_chunk_done();
-            if (checksum != 31261) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_localstore_mark_chunk_done` checksum `31261`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_localstore_cache_oplogs();
+            if (checksum != 16612) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_localstore_cache_oplogs` checksum `16612`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_localstore_commit_truncation();
-            if (checksum != 19019) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_localstore_commit_truncation` checksum `19019`, library returned `{checksum}`");
+            if (checksum != 40519) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_localstore_commit_truncation` checksum `40519`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_localstore_close();
-            if (checksum != 30784) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_localstore_close` checksum `30784`, library returned `{checksum}`");
+            if (checksum != 56982) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_localstore_close` checksum `56982`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_list_files();
+            if (checksum != 59015) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_list_files` checksum `59015`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_list_oplogs();
-            if (checksum != 568) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_list_oplogs` checksum `568`, library returned `{checksum}`");
+            if (checksum != 21570) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_list_oplogs` checksum `21570`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_put_oplog();
-            if (checksum != 30454) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_put_oplog` checksum `30454`, library returned `{checksum}`");
+            if (checksum != 20117) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_put_oplog` checksum `20117`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_put_oplog_cas();
-            if (checksum != 40946) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_put_oplog_cas` checksum `40946`, library returned `{checksum}`");
+            if (checksum != 30474) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_put_oplog_cas` checksum `30474`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_get_oplog();
-            if (checksum != 43262) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_get_oplog` checksum `43262`, library returned `{checksum}`");
+            if (checksum != 18766) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_get_oplog` checksum `18766`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_delete_oplog();
-            if (checksum != 16439) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_delete_oplog` checksum `16439`, library returned `{checksum}`");
+            if (checksum != 31311) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_delete_oplog` checksum `31311`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_put_chunk();
-            if (checksum != 23089) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_put_chunk` checksum `23089`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_put_pack();
+            if (checksum != 15921) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_put_pack` checksum `15921`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_get_chunk();
-            if (checksum != 21109) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_get_chunk` checksum `21109`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_get_pack_range();
+            if (checksum != 21862) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_get_pack_range` checksum `21862`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_delete_chunk();
-            if (checksum != 54597) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_delete_chunk` checksum `54597`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_list_packs();
+            if (checksum != 58649) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_list_packs` checksum `58649`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_list_chunks();
-            if (checksum != 44652) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_list_chunks` checksum `44652`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_delete_pack();
+            if (checksum != 51762) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_delete_pack` checksum `51762`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_put_pack_index();
+            if (checksum != 31916) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_put_pack_index` checksum `31916`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_get_pack_index();
+            if (checksum != 32123) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_get_pack_index` checksum `32123`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_list_pack_indexes();
+            if (checksum != 57555) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_list_pack_indexes` checksum `57555`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_delete_pack_index();
+            if (checksum != 35917) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_delete_pack_index` checksum `35917`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_put_baseline();
-            if (checksum != 59704) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_put_baseline` checksum `59704`, library returned `{checksum}`");
+            if (checksum != 1660) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_put_baseline` checksum `1660`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_get_baseline();
-            if (checksum != 16896) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_get_baseline` checksum `16896`, library returned `{checksum}`");
+            if (checksum != 54519) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_get_baseline` checksum `54519`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_list_baselines();
-            if (checksum != 35117) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_list_baselines` checksum `35117`, library returned `{checksum}`");
+            if (checksum != 62286) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_list_baselines` checksum `62286`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_put_status();
-            if (checksum != 44059) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_put_status` checksum `44059`, library returned `{checksum}`");
+            if (checksum != 5148) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_put_status` checksum `5148`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_remotestorage_list_statuses();
-            if (checksum != 39875) {
-                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_list_statuses` checksum `39875`, library returned `{checksum}`");
+            if (checksum != 30515) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_remotestorage_list_statuses` checksum `30515`, library returned `{checksum}`");
             }
         }
         {
@@ -1863,6 +1957,12 @@ static class _UniFFILib {
             var checksum = _UniFFILib.uniffi_rollforward_checksum_method_syncengine_publish_convergence();
             if (checksum != 38266) {
                 throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_syncengine_publish_convergence` checksum `38266`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_rollforward_checksum_method_syncengine_read_binary();
+            if (checksum != 62026) {
+                throw new UniffiContractChecksumException($"uniffi.rollforward: uniffi bindings expected function `uniffi_rollforward_checksum_method_syncengine_read_binary` checksum `62026`, library returned `{checksum}`");
             }
         }
         {
@@ -2332,7 +2432,8 @@ class FfiConverterTypeEngineNotificationListener: FfiConverter<EngineNotificatio
 /// ```text
 /// <root>/<file_id>/oplogs/{seq}_{client}.oplog
 /// <root>/<file_id>/baselines/baseline_<seq>.zst
-/// <root>/chunks/<hash>
+/// <root>/packs/<pack_id>
+/// <root>/pack-indexes/<pack_id>
 /// <root>/clients_status/<client>.status
 /// ```
 /// </summary>
@@ -2345,7 +2446,8 @@ internal interface ILocalFolderRemote {
 /// ```text
 /// <root>/<file_id>/oplogs/{seq}_{client}.oplog
 /// <root>/<file_id>/baselines/baseline_<seq>.zst
-/// <root>/chunks/<hash>
+/// <root>/packs/<pack_id>
+/// <root>/pack-indexes/<pack_id>
 /// <root>/clients_status/<client>.status
 /// ```
 /// </summary>
@@ -2503,21 +2605,22 @@ internal interface LocalStore {
     /// <exception cref="SyncException"></exception>
     ulong? GetSyncCursor(string @fileId);
     /// <summary>
-    /// True if a chunk has already been transferred (resume skips these).
-    /// </summary>
-    /// <exception cref="SyncException"></exception>
-    bool IsChunkDone(string @hash);
-    /// <summary>
     /// Atomically persist a file's serialized state, its sync cursor, and
     /// (optionally) one cached oplog entry. All-or-nothing.
     /// </summary>
     /// <exception cref="SyncException"></exception>
     void PersistFile(string @fileId, byte[] @state, ulong @head, OplogCacheEntry? @cacheEntry);
     /// <summary>
-    /// Atomically mark a chunk's transfer as complete.
+    /// Batch-cache oplog entries fetched from the remote, keyed by
+    /// `(file_id, sequence)`. Idempotent (overwrites the same key). This is a
+    /// performance hint for incremental reads, not authoritative state: the
+    /// remote listing is the source of truth, and cached rows are only ever
+    /// consumed as a byte-source for sequences that still appear in that listing
+    /// (so stale rows below a remote truncation are inert). An empty batch is a
+    /// no-op.
     /// </summary>
     /// <exception cref="SyncException"></exception>
-    void MarkChunkDone(string @hash);
+    void CacheOplogs(string @fileId, OplogCacheEntry[] @entries);
     /// <summary>
     /// Atomically commit a truncation: drop cached oplogs `<= up_to` and record
     /// the new baseline sequence.
@@ -2691,18 +2794,6 @@ internal class LocalStoreImpl : LocalStore, IDisposable {
     
     
     /// <summary>
-    /// True if a chunk has already been transferred (resume skips these).
-    /// </summary>
-    /// <exception cref="SyncException"></exception>
-    public bool IsChunkDone(string @hash) {
-        return CallWithPointer(thisPtr => FfiConverterBoolean.INSTANCE.Lift(
-    _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_rollforward_fn_method_localstore_is_chunk_done(thisPtr, FfiConverterString.INSTANCE.Lower(@hash), ref _status)
-)));
-    }
-    
-    
-    /// <summary>
     /// Atomically persist a file's serialized state, its sync cursor, and
     /// (optionally) one cached oplog entry. All-or-nothing.
     /// </summary>
@@ -2717,13 +2808,19 @@ internal class LocalStoreImpl : LocalStore, IDisposable {
     
     
     /// <summary>
-    /// Atomically mark a chunk's transfer as complete.
+    /// Batch-cache oplog entries fetched from the remote, keyed by
+    /// `(file_id, sequence)`. Idempotent (overwrites the same key). This is a
+    /// performance hint for incremental reads, not authoritative state: the
+    /// remote listing is the source of truth, and cached rows are only ever
+    /// consumed as a byte-source for sequences that still appear in that listing
+    /// (so stale rows below a remote truncation are inert). An empty batch is a
+    /// no-op.
     /// </summary>
     /// <exception cref="SyncException"></exception>
-    public void MarkChunkDone(string @hash) {
+    public void CacheOplogs(string @fileId, OplogCacheEntry[] @entries) {
         CallWithPointer(thisPtr =>
     _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_rollforward_fn_method_localstore_mark_chunk_done(thisPtr, FfiConverterString.INSTANCE.Lower(@hash), ref _status)
+    _UniFFILib.uniffi_rollforward_fn_method_localstore_cache_oplogs(thisPtr, FfiConverterString.INSTANCE.Lower(@fileId), FfiConverterSequenceTypeOplogCacheEntry.INSTANCE.Lower(@entries), ref _status)
 ));
     }
     
@@ -2892,32 +2989,6 @@ class UniffiCallbackInterfaceLocalStore {
             throw new InternalException($"No callback in handlemap '{handle}'");
         }
     }
-    static void IsChunkDone(ulong @uniffiHandle,RustBuffer @hash,ref sbyte @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
-        var handle = @uniffiHandle;
-        if (FfiConverterTypeLocalStore.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
-            try {
-            var result =
-            uniffiObject.IsChunkDone(
-                FfiConverterString.INSTANCE.Lift(@hash));
-            @uniffiOutReturn = FfiConverterBoolean.INSTANCE.Lower(result);
-            _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
-            }
-            catch (SyncException e) {
-                _uniffi_out_err.code = UniffiCallbackResponseStatus.ERROR;
-                _uniffi_out_err.error_buf = FfiConverterTypeSyncError.INSTANCE.Lower(e);
-            }
-            catch (System.Exception e){
-                _uniffi_out_err.code = UniffiCallbackResponseStatus.UNEXPECTED_ERROR;
-                try {
-                    _uniffi_out_err.error_buf = FfiConverterString.INSTANCE.Lower(e.Message);
-                }
-                catch {
-                }
-            }
-        } else {
-            throw new InternalException($"No callback in handlemap '{handle}'");
-        }
-    }
     static void PersistFile(ulong @uniffiHandle,RustBuffer @fileId,RustBuffer @state,ulong @head,RustBuffer @cacheEntry,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
         var handle = @uniffiHandle;
         if (FfiConverterTypeLocalStore.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
@@ -2945,12 +3016,13 @@ class UniffiCallbackInterfaceLocalStore {
             throw new InternalException($"No callback in handlemap '{handle}'");
         }
     }
-    static void MarkChunkDone(ulong @uniffiHandle,RustBuffer @hash,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+    static void CacheOplogs(ulong @uniffiHandle,RustBuffer @fileId,RustBuffer @entries,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
         var handle = @uniffiHandle;
         if (FfiConverterTypeLocalStore.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
             try {
-            uniffiObject.MarkChunkDone(
-                FfiConverterString.INSTANCE.Lift(@hash));
+            uniffiObject.CacheOplogs(
+                FfiConverterString.INSTANCE.Lift(@fileId), 
+                FfiConverterSequenceTypeOplogCacheEntry.INSTANCE.Lift(@entries));
             _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
             }
             catch (SyncException e) {
@@ -3026,11 +3098,10 @@ class UniffiCallbackInterfaceLocalStore {
     static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod2 _m2 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod2(ListOplogs);
     static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod3 _m3 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod3(GetBaselineMeta);
     static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod4 _m4 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod4(GetSyncCursor);
-    static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod5 _m5 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod5(IsChunkDone);
-    static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod6 _m6 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod6(PersistFile);
-    static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod7 _m7 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod7(MarkChunkDone);
-    static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod8 _m8 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod8(CommitTruncation);
-    static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod9 _m9 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod9(Close);
+    static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod5 _m5 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod5(PersistFile);
+    static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod6 _m6 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod6(CacheOplogs);
+    static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod7 _m7 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod7(CommitTruncation);
+    static _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod8 _m8 = new _UniFFILib.UniffiCallbackInterfaceLocalStoreMethod8(Close);
     static _UniFFILib.UniffiCallbackInterfaceFree _callback_interface_free = new _UniFFILib.UniffiCallbackInterfaceFree(UniffiFree);
 
     public static _UniFFILib.UniffiVTableCallbackInterfaceLocalStore _vtable = new _UniFFILib.UniffiVTableCallbackInterfaceLocalStore {
@@ -3039,11 +3110,10 @@ class UniffiCallbackInterfaceLocalStore {
         @listOplogs = Marshal.GetFunctionPointerForDelegate(_m2),
         @getBaselineMeta = Marshal.GetFunctionPointerForDelegate(_m3),
         @getSyncCursor = Marshal.GetFunctionPointerForDelegate(_m4),
-        @isChunkDone = Marshal.GetFunctionPointerForDelegate(_m5),
-        @persistFile = Marshal.GetFunctionPointerForDelegate(_m6),
-        @markChunkDone = Marshal.GetFunctionPointerForDelegate(_m7),
-        @commitTruncation = Marshal.GetFunctionPointerForDelegate(_m8),
-        @close = Marshal.GetFunctionPointerForDelegate(_m9),
+        @persistFile = Marshal.GetFunctionPointerForDelegate(_m5),
+        @cacheOplogs = Marshal.GetFunctionPointerForDelegate(_m6),
+        @commitTruncation = Marshal.GetFunctionPointerForDelegate(_m7),
+        @close = Marshal.GetFunctionPointerForDelegate(_m8),
         @uniffiFree = Marshal.GetFunctionPointerForDelegate(_callback_interface_free)
     };
 
@@ -3224,6 +3294,14 @@ class FfiConverterTypeRedbStore: FfiConverter<RedbStore, IntPtr> {
 /// </summary>
 internal interface RemoteStorage {
     /// <summary>
+    /// List the ids of every file that has oplog history on the remote. Used by
+    /// binary GC to compute a *global* live-chunk set: packs are a shared,
+    /// content-addressed namespace across all files, so reclaiming a pack is
+    /// only safe once no surviving manifest of *any* file references its chunks.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    string[] ListFiles();
+    /// <summary>
     /// List all oplog objects for a file.
     /// </summary>
     /// <exception cref="SyncException"></exception>
@@ -3251,26 +3329,48 @@ internal interface RemoteStorage {
     /// <exception cref="SyncException"></exception>
     void DeleteOplog(string @fileId, string @remotePath);
     /// <summary>
-    /// Store a content-addressed chunk. Idempotent: writing an existing hash is
-    /// a no-op success.
+    /// Store a pack object (many concatenated chunks) under its content address.
+    /// Idempotent: writing an existing pack id is a no-op success.
     /// </summary>
     /// <exception cref="SyncException"></exception>
-    void PutChunk(string @hash, byte[] @data);
+    void PutPack(string @packId, byte[] @data);
     /// <summary>
-    /// Fetch a chunk's bytes by hash.
+    /// Fetch a byte range `[offset, offset+length)` from a pack — the chunk's
+    /// bytes, located via a pack index.
     /// </summary>
     /// <exception cref="SyncException"></exception>
-    byte[] GetChunk(string @hash);
+    byte[] GetPackRange(string @packId, ulong @offset, uint @length);
     /// <summary>
-    /// Delete a chunk by hash.
+    /// List all stored pack ids (for garbage collection / repack).
     /// </summary>
     /// <exception cref="SyncException"></exception>
-    void DeleteChunk(string @hash);
+    string[] ListPacks();
     /// <summary>
-    /// List all stored chunk hashes (for garbage collection).
+    /// Delete a pack object by id.
     /// </summary>
     /// <exception cref="SyncException"></exception>
-    string[] ListChunks();
+    void DeletePack(string @packId);
+    /// <summary>
+    /// Store a pack index object (the `hash -> offset/length` map for one pack).
+    /// Idempotent by id (`index_id == pack_id`).
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    void PutPackIndex(string @indexId, byte[] @data);
+    /// <summary>
+    /// Fetch a pack index's bytes by id.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    byte[] GetPackIndex(string @indexId);
+    /// <summary>
+    /// List all stored pack index ids.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    string[] ListPackIndexes();
+    /// <summary>
+    /// Delete a pack index object by id.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    void DeletePackIndex(string @indexId);
     /// <summary>
     /// Store a compressed baseline snapshot for a file at a given sequence.
     /// </summary>
@@ -3396,6 +3496,21 @@ internal class RemoteStorageImpl : RemoteStorage, IDisposable {
 
     
     /// <summary>
+    /// List the ids of every file that has oplog history on the remote. Used by
+    /// binary GC to compute a *global* live-chunk set: packs are a shared,
+    /// content-addressed namespace across all files, so reclaiming a pack is
+    /// only safe once no surviving manifest of *any* file references its chunks.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    public string[] ListFiles() {
+        return CallWithPointer(thisPtr => FfiConverterSequenceString.INSTANCE.Lift(
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_list_files(thisPtr,  ref _status)
+)));
+    }
+    
+    
+    /// <summary>
     /// List all oplog objects for a file.
     /// </summary>
     /// <exception cref="SyncException"></exception>
@@ -3461,54 +3576,106 @@ internal class RemoteStorageImpl : RemoteStorage, IDisposable {
     
     
     /// <summary>
-    /// Store a content-addressed chunk. Idempotent: writing an existing hash is
-    /// a no-op success.
+    /// Store a pack object (many concatenated chunks) under its content address.
+    /// Idempotent: writing an existing pack id is a no-op success.
     /// </summary>
     /// <exception cref="SyncException"></exception>
-    public void PutChunk(string @hash, byte[] @data) {
+    public void PutPack(string @packId, byte[] @data) {
         CallWithPointer(thisPtr =>
     _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_put_chunk(thisPtr, FfiConverterString.INSTANCE.Lower(@hash), FfiConverterByteArray.INSTANCE.Lower(@data), ref _status)
+    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_put_pack(thisPtr, FfiConverterString.INSTANCE.Lower(@packId), FfiConverterByteArray.INSTANCE.Lower(@data), ref _status)
 ));
     }
     
     
     
     /// <summary>
-    /// Fetch a chunk's bytes by hash.
+    /// Fetch a byte range `[offset, offset+length)` from a pack — the chunk's
+    /// bytes, located via a pack index.
     /// </summary>
     /// <exception cref="SyncException"></exception>
-    public byte[] GetChunk(string @hash) {
+    public byte[] GetPackRange(string @packId, ulong @offset, uint @length) {
         return CallWithPointer(thisPtr => FfiConverterByteArray.INSTANCE.Lift(
     _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_get_chunk(thisPtr, FfiConverterString.INSTANCE.Lower(@hash), ref _status)
+    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_get_pack_range(thisPtr, FfiConverterString.INSTANCE.Lower(@packId), FfiConverterUInt64.INSTANCE.Lower(@offset), FfiConverterUInt32.INSTANCE.Lower(@length), ref _status)
 )));
     }
     
     
     /// <summary>
-    /// Delete a chunk by hash.
+    /// List all stored pack ids (for garbage collection / repack).
     /// </summary>
     /// <exception cref="SyncException"></exception>
-    public void DeleteChunk(string @hash) {
+    public string[] ListPacks() {
+        return CallWithPointer(thisPtr => FfiConverterSequenceString.INSTANCE.Lift(
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_list_packs(thisPtr,  ref _status)
+)));
+    }
+    
+    
+    /// <summary>
+    /// Delete a pack object by id.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    public void DeletePack(string @packId) {
         CallWithPointer(thisPtr =>
     _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_delete_chunk(thisPtr, FfiConverterString.INSTANCE.Lower(@hash), ref _status)
+    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_delete_pack(thisPtr, FfiConverterString.INSTANCE.Lower(@packId), ref _status)
 ));
     }
     
     
     
     /// <summary>
-    /// List all stored chunk hashes (for garbage collection).
+    /// Store a pack index object (the `hash -> offset/length` map for one pack).
+    /// Idempotent by id (`index_id == pack_id`).
     /// </summary>
     /// <exception cref="SyncException"></exception>
-    public string[] ListChunks() {
-        return CallWithPointer(thisPtr => FfiConverterSequenceString.INSTANCE.Lift(
+    public void PutPackIndex(string @indexId, byte[] @data) {
+        CallWithPointer(thisPtr =>
     _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_list_chunks(thisPtr,  ref _status)
+    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_put_pack_index(thisPtr, FfiConverterString.INSTANCE.Lower(@indexId), FfiConverterByteArray.INSTANCE.Lower(@data), ref _status)
+));
+    }
+    
+    
+    
+    /// <summary>
+    /// Fetch a pack index's bytes by id.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    public byte[] GetPackIndex(string @indexId) {
+        return CallWithPointer(thisPtr => FfiConverterByteArray.INSTANCE.Lift(
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_get_pack_index(thisPtr, FfiConverterString.INSTANCE.Lower(@indexId), ref _status)
 )));
     }
+    
+    
+    /// <summary>
+    /// List all stored pack index ids.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    public string[] ListPackIndexes() {
+        return CallWithPointer(thisPtr => FfiConverterSequenceString.INSTANCE.Lift(
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_list_pack_indexes(thisPtr,  ref _status)
+)));
+    }
+    
+    
+    /// <summary>
+    /// Delete a pack index object by id.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    public void DeletePackIndex(string @indexId) {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_rollforward_fn_method_remotestorage_delete_pack_index(thisPtr, FfiConverterString.INSTANCE.Lower(@indexId), ref _status)
+));
+    }
+    
     
     
     /// <summary>
@@ -3577,6 +3744,31 @@ internal class RemoteStorageImpl : RemoteStorage, IDisposable {
     
 }
 class UniffiCallbackInterfaceRemoteStorage {
+    static void ListFiles(ulong @uniffiHandle,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+        var handle = @uniffiHandle;
+        if (FfiConverterTypeRemoteStorage.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
+            try {
+            var result =
+            uniffiObject.ListFiles();
+            @uniffiOutReturn = FfiConverterSequenceString.INSTANCE.Lower(result);
+            _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
+            }
+            catch (SyncException e) {
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.ERROR;
+                _uniffi_out_err.error_buf = FfiConverterTypeSyncError.INSTANCE.Lower(e);
+            }
+            catch (System.Exception e){
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.UNEXPECTED_ERROR;
+                try {
+                    _uniffi_out_err.error_buf = FfiConverterString.INSTANCE.Lower(e.Message);
+                }
+                catch {
+                }
+            }
+        } else {
+            throw new InternalException($"No callback in handlemap '{handle}'");
+        }
+    }
     static void ListOplogs(ulong @uniffiHandle,RustBuffer @fileId,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
         var handle = @uniffiHandle;
         if (FfiConverterTypeRemoteStorage.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
@@ -3705,12 +3897,12 @@ class UniffiCallbackInterfaceRemoteStorage {
             throw new InternalException($"No callback in handlemap '{handle}'");
         }
     }
-    static void PutChunk(ulong @uniffiHandle,RustBuffer @hash,RustBuffer @data,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+    static void PutPack(ulong @uniffiHandle,RustBuffer @packId,RustBuffer @data,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
         var handle = @uniffiHandle;
         if (FfiConverterTypeRemoteStorage.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
             try {
-            uniffiObject.PutChunk(
-                FfiConverterString.INSTANCE.Lift(@hash), 
+            uniffiObject.PutPack(
+                FfiConverterString.INSTANCE.Lift(@packId), 
                 FfiConverterByteArray.INSTANCE.Lift(@data));
             _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
             }
@@ -3730,13 +3922,15 @@ class UniffiCallbackInterfaceRemoteStorage {
             throw new InternalException($"No callback in handlemap '{handle}'");
         }
     }
-    static void GetChunk(ulong @uniffiHandle,RustBuffer @hash,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+    static void GetPackRange(ulong @uniffiHandle,RustBuffer @packId,ulong @offset,uint @length,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
         var handle = @uniffiHandle;
         if (FfiConverterTypeRemoteStorage.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
             try {
             var result =
-            uniffiObject.GetChunk(
-                FfiConverterString.INSTANCE.Lift(@hash));
+            uniffiObject.GetPackRange(
+                FfiConverterString.INSTANCE.Lift(@packId), 
+                FfiConverterUInt64.INSTANCE.Lift(@offset), 
+                FfiConverterUInt32.INSTANCE.Lift(@length));
             @uniffiOutReturn = FfiConverterByteArray.INSTANCE.Lower(result);
             _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
             }
@@ -3756,12 +3950,13 @@ class UniffiCallbackInterfaceRemoteStorage {
             throw new InternalException($"No callback in handlemap '{handle}'");
         }
     }
-    static void DeleteChunk(ulong @uniffiHandle,RustBuffer @hash,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+    static void ListPacks(ulong @uniffiHandle,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
         var handle = @uniffiHandle;
         if (FfiConverterTypeRemoteStorage.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
             try {
-            uniffiObject.DeleteChunk(
-                FfiConverterString.INSTANCE.Lift(@hash));
+            var result =
+            uniffiObject.ListPacks();
+            @uniffiOutReturn = FfiConverterSequenceString.INSTANCE.Lower(result);
             _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
             }
             catch (SyncException e) {
@@ -3780,13 +3975,112 @@ class UniffiCallbackInterfaceRemoteStorage {
             throw new InternalException($"No callback in handlemap '{handle}'");
         }
     }
-    static void ListChunks(ulong @uniffiHandle,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+    static void DeletePack(ulong @uniffiHandle,RustBuffer @packId,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+        var handle = @uniffiHandle;
+        if (FfiConverterTypeRemoteStorage.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
+            try {
+            uniffiObject.DeletePack(
+                FfiConverterString.INSTANCE.Lift(@packId));
+            _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
+            }
+            catch (SyncException e) {
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.ERROR;
+                _uniffi_out_err.error_buf = FfiConverterTypeSyncError.INSTANCE.Lower(e);
+            }
+            catch (System.Exception e){
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.UNEXPECTED_ERROR;
+                try {
+                    _uniffi_out_err.error_buf = FfiConverterString.INSTANCE.Lower(e.Message);
+                }
+                catch {
+                }
+            }
+        } else {
+            throw new InternalException($"No callback in handlemap '{handle}'");
+        }
+    }
+    static void PutPackIndex(ulong @uniffiHandle,RustBuffer @indexId,RustBuffer @data,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+        var handle = @uniffiHandle;
+        if (FfiConverterTypeRemoteStorage.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
+            try {
+            uniffiObject.PutPackIndex(
+                FfiConverterString.INSTANCE.Lift(@indexId), 
+                FfiConverterByteArray.INSTANCE.Lift(@data));
+            _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
+            }
+            catch (SyncException e) {
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.ERROR;
+                _uniffi_out_err.error_buf = FfiConverterTypeSyncError.INSTANCE.Lower(e);
+            }
+            catch (System.Exception e){
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.UNEXPECTED_ERROR;
+                try {
+                    _uniffi_out_err.error_buf = FfiConverterString.INSTANCE.Lower(e.Message);
+                }
+                catch {
+                }
+            }
+        } else {
+            throw new InternalException($"No callback in handlemap '{handle}'");
+        }
+    }
+    static void GetPackIndex(ulong @uniffiHandle,RustBuffer @indexId,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
         var handle = @uniffiHandle;
         if (FfiConverterTypeRemoteStorage.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
             try {
             var result =
-            uniffiObject.ListChunks();
+            uniffiObject.GetPackIndex(
+                FfiConverterString.INSTANCE.Lift(@indexId));
+            @uniffiOutReturn = FfiConverterByteArray.INSTANCE.Lower(result);
+            _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
+            }
+            catch (SyncException e) {
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.ERROR;
+                _uniffi_out_err.error_buf = FfiConverterTypeSyncError.INSTANCE.Lower(e);
+            }
+            catch (System.Exception e){
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.UNEXPECTED_ERROR;
+                try {
+                    _uniffi_out_err.error_buf = FfiConverterString.INSTANCE.Lower(e.Message);
+                }
+                catch {
+                }
+            }
+        } else {
+            throw new InternalException($"No callback in handlemap '{handle}'");
+        }
+    }
+    static void ListPackIndexes(ulong @uniffiHandle,ref RustBuffer @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+        var handle = @uniffiHandle;
+        if (FfiConverterTypeRemoteStorage.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
+            try {
+            var result =
+            uniffiObject.ListPackIndexes();
             @uniffiOutReturn = FfiConverterSequenceString.INSTANCE.Lower(result);
+            _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
+            }
+            catch (SyncException e) {
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.ERROR;
+                _uniffi_out_err.error_buf = FfiConverterTypeSyncError.INSTANCE.Lower(e);
+            }
+            catch (System.Exception e){
+                _uniffi_out_err.code = UniffiCallbackResponseStatus.UNEXPECTED_ERROR;
+                try {
+                    _uniffi_out_err.error_buf = FfiConverterString.INSTANCE.Lower(e.Message);
+                }
+                catch {
+                }
+            }
+        } else {
+            throw new InternalException($"No callback in handlemap '{handle}'");
+        }
+    }
+    static void DeletePackIndex(ulong @uniffiHandle,RustBuffer @indexId,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+        var handle = @uniffiHandle;
+        if (FfiConverterTypeRemoteStorage.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
+            try {
+            uniffiObject.DeletePackIndex(
+                FfiConverterString.INSTANCE.Lift(@indexId));
             _uniffi_out_err.code = UniffiCallbackResponseStatus.SUCCESS;
             }
             catch (SyncException e) {
@@ -3938,37 +4232,47 @@ class UniffiCallbackInterfaceRemoteStorage {
     static void UniffiFree(ulong @handle) {
         FfiConverterTypeRemoteStorage.INSTANCE.handleMap.Remove(@handle);
     }
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod0 _m0 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod0(ListOplogs);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod1 _m1 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod1(PutOplog);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod2 _m2 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod2(PutOplogCas);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod3 _m3 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod3(GetOplog);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod4 _m4 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod4(DeleteOplog);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod5 _m5 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod5(PutChunk);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod6 _m6 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod6(GetChunk);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod7 _m7 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod7(DeleteChunk);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod8 _m8 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod8(ListChunks);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod9 _m9 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod9(PutBaseline);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod10 _m10 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod10(GetBaseline);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod11 _m11 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod11(ListBaselines);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod12 _m12 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod12(PutStatus);
-    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod13 _m13 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod13(ListStatuses);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod0 _m0 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod0(ListFiles);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod1 _m1 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod1(ListOplogs);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod2 _m2 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod2(PutOplog);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod3 _m3 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod3(PutOplogCas);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod4 _m4 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod4(GetOplog);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod5 _m5 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod5(DeleteOplog);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod6 _m6 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod6(PutPack);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod7 _m7 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod7(GetPackRange);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod8 _m8 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod8(ListPacks);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod9 _m9 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod9(DeletePack);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod10 _m10 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod10(PutPackIndex);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod11 _m11 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod11(GetPackIndex);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod12 _m12 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod12(ListPackIndexes);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod13 _m13 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod13(DeletePackIndex);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod14 _m14 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod14(PutBaseline);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod15 _m15 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod15(GetBaseline);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod16 _m16 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod16(ListBaselines);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod17 _m17 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod17(PutStatus);
+    static _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod18 _m18 = new _UniFFILib.UniffiCallbackInterfaceRemoteStorageMethod18(ListStatuses);
     static _UniFFILib.UniffiCallbackInterfaceFree _callback_interface_free = new _UniFFILib.UniffiCallbackInterfaceFree(UniffiFree);
 
     public static _UniFFILib.UniffiVTableCallbackInterfaceRemoteStorage _vtable = new _UniFFILib.UniffiVTableCallbackInterfaceRemoteStorage {
-        @listOplogs = Marshal.GetFunctionPointerForDelegate(_m0),
-        @putOplog = Marshal.GetFunctionPointerForDelegate(_m1),
-        @putOplogCas = Marshal.GetFunctionPointerForDelegate(_m2),
-        @getOplog = Marshal.GetFunctionPointerForDelegate(_m3),
-        @deleteOplog = Marshal.GetFunctionPointerForDelegate(_m4),
-        @putChunk = Marshal.GetFunctionPointerForDelegate(_m5),
-        @getChunk = Marshal.GetFunctionPointerForDelegate(_m6),
-        @deleteChunk = Marshal.GetFunctionPointerForDelegate(_m7),
-        @listChunks = Marshal.GetFunctionPointerForDelegate(_m8),
-        @putBaseline = Marshal.GetFunctionPointerForDelegate(_m9),
-        @getBaseline = Marshal.GetFunctionPointerForDelegate(_m10),
-        @listBaselines = Marshal.GetFunctionPointerForDelegate(_m11),
-        @putStatus = Marshal.GetFunctionPointerForDelegate(_m12),
-        @listStatuses = Marshal.GetFunctionPointerForDelegate(_m13),
+        @listFiles = Marshal.GetFunctionPointerForDelegate(_m0),
+        @listOplogs = Marshal.GetFunctionPointerForDelegate(_m1),
+        @putOplog = Marshal.GetFunctionPointerForDelegate(_m2),
+        @putOplogCas = Marshal.GetFunctionPointerForDelegate(_m3),
+        @getOplog = Marshal.GetFunctionPointerForDelegate(_m4),
+        @deleteOplog = Marshal.GetFunctionPointerForDelegate(_m5),
+        @putPack = Marshal.GetFunctionPointerForDelegate(_m6),
+        @getPackRange = Marshal.GetFunctionPointerForDelegate(_m7),
+        @listPacks = Marshal.GetFunctionPointerForDelegate(_m8),
+        @deletePack = Marshal.GetFunctionPointerForDelegate(_m9),
+        @putPackIndex = Marshal.GetFunctionPointerForDelegate(_m10),
+        @getPackIndex = Marshal.GetFunctionPointerForDelegate(_m11),
+        @listPackIndexes = Marshal.GetFunctionPointerForDelegate(_m12),
+        @deletePackIndex = Marshal.GetFunctionPointerForDelegate(_m13),
+        @putBaseline = Marshal.GetFunctionPointerForDelegate(_m14),
+        @getBaseline = Marshal.GetFunctionPointerForDelegate(_m15),
+        @listBaselines = Marshal.GetFunctionPointerForDelegate(_m16),
+        @putStatus = Marshal.GetFunctionPointerForDelegate(_m17),
+        @listStatuses = Marshal.GetFunctionPointerForDelegate(_m18),
         @uniffiFree = Marshal.GetFunctionPointerForDelegate(_callback_interface_free)
     };
 
@@ -4060,6 +4364,13 @@ internal interface ISyncEngine {
     /// </summary>
     /// <exception cref="SyncException"></exception>
     void PublishConvergence(string @fileId, bool @isText);
+    /// <summary>
+    /// Reassemble and return the current bytes of a tracked binary file,
+    /// resolving each manifest chunk to a byte range within its pack. Errors if
+    /// the file is not a tracked binary file or a chunk cannot be located.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    byte[] ReadBinary(string @fileId);
     /// <summary>
     /// Roll a file back to the state at sequence `k` by appending a *new*
     /// compensating entry (history is never mutated). Returns the new sequence.
@@ -4276,6 +4587,20 @@ internal class SyncEngine : ISyncEngine, IDisposable {
 ));
     }
     
+    
+    
+    /// <summary>
+    /// Reassemble and return the current bytes of a tracked binary file,
+    /// resolving each manifest chunk to a byte range within its pack. Errors if
+    /// the file is not a tracked binary file or a chunk cannot be located.
+    /// </summary>
+    /// <exception cref="SyncException"></exception>
+    public byte[] ReadBinary(string @fileId) {
+        return CallWithPointer(thisPtr => FfiConverterByteArray.INSTANCE.Lift(
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeSyncError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_rollforward_fn_method_syncengine_read_binary(thisPtr, FfiConverterString.INSTANCE.Lower(@fileId), ref _status)
+)));
+    }
     
     
     /// <summary>

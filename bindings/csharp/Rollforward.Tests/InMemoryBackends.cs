@@ -13,7 +13,8 @@ internal sealed class InMemoryRemote : RemoteStorage
 {
     // file_id -> (remote_path -> entry bytes-ish). We keep the decoded entry.
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, OpLogEntry>> _oplogs = new();
-    private readonly ConcurrentDictionary<string, byte[]> _chunks = new();
+    private readonly ConcurrentDictionary<string, byte[]> _packs = new();
+    private readonly ConcurrentDictionary<string, byte[]> _packIndexes = new();
     private readonly ConcurrentDictionary<string, SortedDictionary<ulong, byte[]>> _baselines = new();
     private readonly ConcurrentDictionary<string, ulong> _statuses = new();
     private readonly object _gate = new();
@@ -22,6 +23,9 @@ internal sealed class InMemoryRemote : RemoteStorage
 
     private ConcurrentDictionary<string, OpLogEntry> FileOplogs(string fileId) =>
         _oplogs.GetOrAdd(fileId, _ => new());
+
+    public string[] ListFiles() =>
+        _oplogs.Where(kv => !kv.Value.IsEmpty).Select(kv => kv.Key).ToArray();
 
     public RemoteLogItem[] ListOplogs(string fileId)
     {
@@ -62,13 +66,28 @@ internal sealed class InMemoryRemote : RemoteStorage
         FileOplogs(fileId).TryRemove(remotePath, out _);
     }
 
-    public void PutChunk(string hash, byte[] data) => _chunks.TryAdd(hash, data);
+    // Content-addressed pack objects. PutPack is idempotent by id.
+    public void PutPack(string packId, byte[] data) => _packs.TryAdd(packId, data);
 
-    public byte[] GetChunk(string hash) => _chunks[hash];
+    public byte[] GetPackRange(string packId, ulong offset, uint length)
+    {
+        var pack = _packs[packId];
+        var slice = new byte[length];
+        Array.Copy(pack, (long)offset, slice, 0, length);
+        return slice;
+    }
 
-    public void DeleteChunk(string hash) => _chunks.TryRemove(hash, out _);
+    public string[] ListPacks() => _packs.Keys.ToArray();
 
-    public string[] ListChunks() => _chunks.Keys.ToArray();
+    public void DeletePack(string packId) => _packs.TryRemove(packId, out _);
+
+    public void PutPackIndex(string indexId, byte[] data) => _packIndexes.TryAdd(indexId, data);
+
+    public byte[] GetPackIndex(string indexId) => _packIndexes[indexId];
+
+    public string[] ListPackIndexes() => _packIndexes.Keys.ToArray();
+
+    public void DeletePackIndex(string indexId) => _packIndexes.TryRemove(indexId, out _);
 
     public void PutBaseline(string fileId, ulong seq, byte[] data)
     {

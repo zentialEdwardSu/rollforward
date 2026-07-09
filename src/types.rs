@@ -116,6 +116,15 @@ pub enum SyncError {
         /// Human-readable detail.
         msg: String,
     },
+    /// A fetched chunk's bytes did not hash to their content address — the
+    /// object was corrupted or truncated in storage or in transit. Content is
+    /// addressed by hash, so this is always detectable on read; the caller
+    /// should re-fetch (a transient transfer fault) or treat the pack as bad.
+    #[error("chunk {hash} failed integrity check (corrupt or truncated)")]
+    Corrupt {
+        /// The expected content-address (blake3 hex) of the chunk.
+        hash: String,
+    },
 }
 
 /// UI-facing notifications emitted by the engine. Remote I/O is *not* routed

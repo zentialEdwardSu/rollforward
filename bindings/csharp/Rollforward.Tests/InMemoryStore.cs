@@ -15,7 +15,6 @@ internal sealed class InMemoryStore : LocalStore
     private readonly ConcurrentDictionary<string, SortedDictionary<ulong, byte[]>> _oplogs = new();
     private readonly ConcurrentDictionary<string, ulong> _baselineMeta = new();
     private readonly ConcurrentDictionary<string, ulong> _cursors = new();
-    private readonly ConcurrentDictionary<string, bool> _chunksDone = new();
     private readonly object _gate = new();
 
     public byte[]? GetFileState(string fileId) =>
@@ -41,8 +40,6 @@ internal sealed class InMemoryStore : LocalStore
     public ulong? GetSyncCursor(string fileId) =>
         _cursors.TryGetValue(fileId, out var v) ? v : null;
 
-    public bool IsChunkDone(string hash) => _chunksDone.ContainsKey(hash);
-
     public void PersistFile(string fileId, byte[] state, ulong head, OplogCacheEntry? cacheEntry)
     {
         // All-or-nothing under one lock, mirroring the redb transaction.
@@ -58,7 +55,21 @@ internal sealed class InMemoryStore : LocalStore
         }
     }
 
-    public void MarkChunkDone(string hash) => _chunksDone[hash] = true;
+    public void CacheOplogs(string fileId, OplogCacheEntry[] entries)
+    {
+        if (entries.Length == 0)
+        {
+            return;
+        }
+        lock (_gate)
+        {
+            var m = _oplogs.GetOrAdd(fileId, _ => new SortedDictionary<ulong, byte[]>());
+            foreach (var e in entries)
+            {
+                m[e.sequence] = e.data;
+            }
+        }
+    }
 
     public void CommitTruncation(string fileId, ulong upTo)
     {

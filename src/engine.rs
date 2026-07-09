@@ -159,20 +159,68 @@ impl SyncEngine {
         }
     }
 
-    /// Decode every remote oplog entry for a file, sorted by (sequence, client).
+    /// Decode every remote oplog entry for a file, sorted by (sequence, client),
+    /// discarding the list of entries newly fetched from the remote. Used by
+    /// callers (rollback/truncate) that do not update the local oplog cache.
     fn load_entries(&self, file_id: &str) -> Result<Vec<OpLogEntry>, SyncError> {
+        Ok(self.load_entries_caching(file_id)?.0)
+    }
+
+    /// Decode every remote oplog entry for a file, sorted by (sequence, client),
+    /// serving each entry's bytes from the local redb oplog cache when possible
+    /// and issuing a remote `get_oplog` only for entries not already cached.
+    ///
+    /// Returns `(all_entries, newly_fetched)` where `newly_fetched` is the subset
+    /// pulled from the remote this call — the caller passes it to
+    /// [`LocalStore::cache_oplogs`] *after* the authoritative persist so the next
+    /// sync avoids re-fetching them.
+    ///
+    /// Correctness:
+    /// - Every remote read happens here, before any caller-side persist, so a
+    ///   mid-read failure leaves local state untouched (rollback guarantee).
+    /// - A **forked** sequence (claimed by more than one client) is always
+    ///   re-fetched, never served from the single-slot cache — so fork detection
+    ///   and three-way merge see every side.
+    /// - The cache is consulted only for sequences present in the remote listing,
+    ///   so rows left stale by a remote truncation on another client are inert.
+    fn load_entries_caching(
+        &self,
+        file_id: &str,
+    ) -> Result<(Vec<OpLogEntry>, Vec<OplogCacheEntry>), SyncError> {
         let mut items = self.remote.list_oplogs(file_id.to_owned())?;
         oplog::sort_items(&mut items);
+        let forked: HashSet<u64> = oplog::forked_sequences(&items).into_iter().collect();
+
+        let mut cached: HashMap<u64, Vec<u8>> = HashMap::new();
+        for e in self.store.list_oplogs(file_id.to_owned())? {
+            cached.insert(e.sequence, e.data);
+        }
+
         let mut entries = Vec::with_capacity(items.len());
+        let mut fetched = Vec::new();
         for item in &items {
-            let bytes = self
-                .remote
-                .get_oplog(file_id.to_owned(), item.remote_path.clone())?;
+            let bytes = if forked.contains(&item.sequence) {
+                // A forked sequence is always re-fetched — never served from the
+                // single-slot cache — so every side reaches the merge.
+                self.remote
+                    .get_oplog(file_id.to_owned(), item.remote_path.clone())?
+            } else if let Some(b) = cached.get(&item.sequence) {
+                b.clone()
+            } else {
+                let b = self
+                    .remote
+                    .get_oplog(file_id.to_owned(), item.remote_path.clone())?;
+                fetched.push(OplogCacheEntry {
+                    sequence: item.sequence,
+                    data: b.clone(),
+                });
+                b
+            };
             let entry: OpLogEntry = serde_json::from_slice(&bytes)
                 .map_err(|e| SyncError::SerdeError { msg: e.to_string() })?;
             entries.push(entry);
         }
-        Ok(entries)
+        Ok((entries, fetched))
     }
 
     /// Latest baseline (decompressed full-update, sequence) for a text file.
@@ -379,20 +427,172 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Upload chunks with per-chunk resume: skip chunks already marked done (or
-    /// already present remotely), marking each done after a successful upload.
-    fn upload_chunks(
+    /// Build the union chunk-location index across every pack index on the
+    /// remote: `hash -> (pack_id, offset, length)`. Pack indexes are immutable
+    /// and content-addressed, so unioning them needs no coordination; a hash in
+    /// more than one pack resolves to whichever wins the fold (bytes identical).
+    fn load_pack_index(&self) -> Result<HashMap<String, (String, u64, u32)>, SyncError> {
+        let mut map = HashMap::new();
+        for index_id in self.remote.list_pack_indexes()? {
+            let bytes = self.remote.get_pack_index(index_id)?;
+            let index: binary::PackIndex = serde_json::from_slice(&bytes)
+                .map_err(|e| SyncError::SerdeError { msg: e.to_string() })?;
+            for c in index.chunks {
+                map.entry(c.hash)
+                    .or_insert((index.pack_id.clone(), c.offset, c.length));
+            }
+        }
+        Ok(map)
+    }
+
+    /// Pack and upload the chunks not already stored remotely, with pack-level
+    /// resume. Dedup is decided against the union pack index (content-addressed),
+    /// so re-uploading identical content produces no new packs. `put_pack` /
+    /// `put_pack_index` are idempotent by id, so an upload interrupted after some
+    /// packs are written completes safely on retry (already-written packs re-PUT
+    /// as no-ops).
+    fn upload_packs(
         &self,
         chunks: &[(crate::types::ChunkInfo, Vec<u8>)],
     ) -> Result<(), SyncError> {
-        for (info, bytes) in chunks {
-            if self.store.is_chunk_done(info.hash.clone())? {
-                continue;
-            }
-            self.remote.put_chunk(info.hash.clone(), bytes.clone())?;
-            self.store.mark_chunk_done(info.hash.clone())?;
+        let existing = self.load_pack_index()?;
+        let new: Vec<(crate::types::ChunkInfo, Vec<u8>)> = chunks
+            .iter()
+            .filter(|(c, _)| !existing.contains_key(&c.hash))
+            .cloned()
+            .collect();
+        for (pack_id, bytes, index) in binary::build_packs(&new) {
+            let index_bytes = serde_json::to_vec(&index)
+                .map_err(|e| SyncError::SerdeError { msg: e.to_string() })?;
+            self.remote.put_pack(pack_id.clone(), bytes)?;
+            self.remote.put_pack_index(pack_id, index_bytes)?;
         }
         Ok(())
+    }
+
+    /// Garbage-collect every pack against the `live` chunk set: delete dead
+    /// packs, repack mostly-dead ones (see [`binary::classify_pack`]). Each
+    /// repack writes the new pack *before* deleting the old, so an interruption
+    /// never strands a live chunk — at worst a superseded pack lingers until the
+    /// next pass.
+    /// Union of every chunk hash still referenced by any surviving binary
+    /// manifest across *all* files on the remote. Read authoritatively from the
+    /// remote oplog (not the local `files` map) because another client may track
+    /// files this client has never opened. A chunk absent from this set is dead
+    /// for the whole store and its pack may be reclaimed.
+    fn global_live_chunks(&self) -> Result<HashSet<String>, SyncError> {
+        let mut live = HashSet::new();
+        for fid in self.remote.list_files()? {
+            for entry in self.load_entries(&fid)? {
+                if let ChangeType::BinarySnapshot { chunk_hashes } = entry.change_type {
+                    live.extend(chunk_hashes);
+                }
+            }
+        }
+        Ok(live)
+    }
+
+    fn gc_packs(&self, live: &HashSet<String>) -> Result<(), SyncError> {
+        for index_id in self.remote.list_pack_indexes()? {
+            let bytes = self.remote.get_pack_index(index_id.clone())?;
+            let index: binary::PackIndex = serde_json::from_slice(&bytes)
+                .map_err(|e| SyncError::SerdeError { msg: e.to_string() })?;
+            match binary::classify_pack(&index.chunks, live) {
+                binary::PackGc::Keep | binary::PackGc::KeepMixed => {}
+                binary::PackGc::Delete => {
+                    self.remote.delete_pack(index.pack_id)?;
+                    self.remote.delete_pack_index(index_id)?;
+                }
+                binary::PackGc::Repack { live: live_hashes } => {
+                    self.repack_live(&index, &live_hashes)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rewrite the surviving chunks of `old` into a fresh pack, then delete the
+    /// old pack and its index. Reads each live chunk's bytes by range from the
+    /// old pack and re-packs them (a repacked pack is fully live, so it survives
+    /// subsequent passes). No-op-safe: if the repacked chunks all already live
+    /// elsewhere, `build_packs` still emits a self-contained pack for them.
+    fn repack_live(
+        &self,
+        old: &binary::PackIndex,
+        live_hashes: &[String],
+    ) -> Result<(), SyncError> {
+        let mut chunks: Vec<(crate::types::ChunkInfo, Vec<u8>)> = Vec::new();
+        for c in &old.chunks {
+            if live_hashes.contains(&c.hash) {
+                let data = self
+                    .remote
+                    .get_pack_range(old.pack_id.clone(), c.offset, c.length)?;
+                // Verify before rewriting: repacking a corrupt/truncated read
+                // would content-address the bad bytes into a fresh pack under a
+                // new id, silently laundering corruption. Fail loud instead.
+                if !binary::verify_chunk(&c.hash, &data) {
+                    return Err(SyncError::Corrupt {
+                        hash: c.hash.clone(),
+                    });
+                }
+                chunks.push((
+                    crate::types::ChunkInfo {
+                        hash: c.hash.clone(),
+                        offset: c.offset,
+                        length: c.length,
+                    },
+                    data,
+                ));
+            }
+        }
+        for (pack_id, bytes, index) in binary::build_packs(&chunks) {
+            let index_bytes = serde_json::to_vec(&index)
+                .map_err(|e| SyncError::SerdeError { msg: e.to_string() })?;
+            self.remote.put_pack(pack_id.clone(), bytes)?;
+            self.remote.put_pack_index(pack_id, index_bytes)?;
+        }
+        // Old pack superseded: its live chunks now live in the fresh pack(s).
+        self.remote.delete_pack(old.pack_id.clone())?;
+        self.remote.delete_pack_index(old.pack_id.clone())?;
+        Ok(())
+    }
+}
+
+#[uniffi::export]
+impl SyncEngine {
+    /// Reassemble and return the current bytes of a tracked binary file,
+    /// resolving each manifest chunk to a byte range within its pack. Errors if
+    /// the file is not a tracked binary file or a chunk cannot be located.
+    pub fn read_binary(&self, file_id: String) -> Result<Vec<u8>, SyncError> {
+        let manifest = {
+            let files = self.files.read().expect("files lock poisoned");
+            match files.get(&file_id).map(|f| &f.state) {
+                Some(FileState::Binary { manifest }) => manifest.clone(),
+                _ => {
+                    return Err(SyncError::IoError {
+                        msg: format!("{file_id} is not a tracked binary file"),
+                    });
+                }
+            }
+        };
+        let index = self.load_pack_index()?;
+        binary::reassemble(&manifest, |hash| {
+            let (pack_id, offset, length) =
+                index.get(hash).ok_or_else(|| SyncError::IoError {
+                    msg: format!("chunk {hash} not found in any pack"),
+                })?;
+            let bytes = self
+                .remote
+                .get_pack_range(pack_id.clone(), *offset, *length)?;
+            // Content is hash-addressed: verify the bytes actually hash to the
+            // manifest hash. Catches truncated Range responses and in-transit
+            // corruption that a network backend can deliver but a length-only
+            // read would accept as valid.
+            if !binary::verify_chunk(hash, &bytes) {
+                return Err(SyncError::Corrupt { hash: hash.into() });
+            }
+            Ok(bytes)
+        })
     }
 }
 
@@ -439,7 +639,7 @@ impl SyncEngine {
     pub fn modify_binary(&self, file_id: String, data: Vec<u8>) -> Result<u64, SyncError> {
         // Chunk + upload outside the files lock (I/O heavy, lock-free append).
         let chunks = binary::chunk_data(&data);
-        self.upload_chunks(&chunks)?;
+        self.upload_packs(&chunks)?;
         let man: Vec<String> = chunks.iter().map(|(c, _)| c.hash.clone()).collect();
 
         let mut files = self.files.write().expect("files lock poisoned");
@@ -490,7 +690,7 @@ impl SyncEngine {
             file_id: file_id.clone(),
         };
 
-        let entries = self.load_entries(&file_id)?;
+        let (entries, fetched) = self.load_entries_caching(&file_id)?;
         if entries.is_empty() {
             return Ok(());
         }
@@ -511,6 +711,11 @@ impl SyncEngine {
             self.remote.put_status(self.client_id.clone(), file.head)?;
             files.insert(file_id.clone(), file);
         }
+        // Warm the local oplog cache with entries fetched this sync, so the next
+        // sync (and CAS-retry rebase) serves them locally instead of re-GETting.
+        // Runs after the authoritative persist above; a failure here is a
+        // cache-only miss the next sync self-heals, but we surface it (Rule 12).
+        self.store.cache_oplogs(file_id.clone(), fetched)?;
 
         if needs_copy {
             self.listener
@@ -717,20 +922,19 @@ impl SyncEngine {
         }
         self.store.commit_truncation(file_id.clone(), cut)?;
 
-        // Binary GC: delete chunks referenced by no surviving manifest.
+        // Binary GC: reclaim space from packs no longer fully referenced.
+        // Per pack (classified by `binary::classify_pack`): fully-dead packs are
+        // deleted; packs past the dead-byte threshold are repacked (surviving
+        // chunks rewritten into a fresh pack, old one dropped); mostly-live packs
+        // are left for a later, deader pass. Chunks are content-addressed, so a
+        // live chunk duplicated across packs simply keeps each pack that holds it.
+        //
+        // The live set spans *every* file on the remote, not just the one being
+        // truncated: packs are a shared global namespace, so a pack holding
+        // another file's live chunks must never be reclaimed here.
         if !is_text {
-            let survivors = self.load_entries(&file_id)?;
-            let live: Vec<Vec<String>> = survivors
-                .iter()
-                .filter_map(|e| match &e.change_type {
-                    ChangeType::BinarySnapshot { chunk_hashes } => Some(chunk_hashes.clone()),
-                    _ => None,
-                })
-                .collect();
-            let stored = self.remote.list_chunks()?;
-            for orphan in binary::orphaned_chunks(&live, &stored) {
-                self.remote.delete_chunk(orphan)?;
-            }
+            let live = self.global_live_chunks()?;
+            self.gc_packs(&live)?;
         }
         Ok(())
     }
