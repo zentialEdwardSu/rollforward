@@ -3,3 +3,5 @@
 # .NET build output for the C# bindings
 bin/
 obj/
+target/
+.claude/
