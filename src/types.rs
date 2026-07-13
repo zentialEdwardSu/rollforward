@@ -78,6 +78,10 @@ pub struct OplogCacheEntry {
 /// How to resolve a genuine content conflict between two binary versions.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinaryConflictPolicy {
+    /// Stop before applying a genuine divergent binary fork so the host can
+    /// collect the user's decision. No local state or remote convergence entry
+    /// is written for that sync attempt.
+    Manual,
     /// Discard the remote version, keep the local one.
     KeepLocal,
     /// Discard the local version, keep the remote one.

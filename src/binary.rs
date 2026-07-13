@@ -153,6 +153,9 @@ pub enum BinaryMerge {
     Unchanged(Vec<String>),
     /// Exactly one side changed; that manifest is the merged result.
     FastForward(Vec<String>),
+    /// Both sides changed differently and the caller must collect a decision
+    /// before it can choose a resulting manifest.
+    NeedsResolution,
     /// Both sides changed the content differently — a real conflict, resolved
     /// per the supplied policy.
     Conflict {
@@ -188,6 +191,7 @@ pub fn merge_manifests(
                 BinaryMerge::Unchanged(local.to_vec())
             } else {
                 match policy {
+                    BinaryConflictPolicy::Manual => BinaryMerge::NeedsResolution,
                     BinaryConflictPolicy::KeepLocal => BinaryMerge::Conflict {
                         resolved: local.to_vec(),
                         needs_copy: false,

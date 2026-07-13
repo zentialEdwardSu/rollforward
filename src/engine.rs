@@ -284,7 +284,7 @@ impl SyncEngine {
 
     /// Resolve binary state by replaying manifests in sequence order, running a
     /// three-way merge at any forked sequence.
-    fn build_binary(&self, entries: &[OpLogEntry]) -> (TrackedFile, bool) {
+    fn build_binary(&self, entries: &[OpLogEntry]) -> Result<(TrackedFile, bool), SyncError> {
         let mut current: Vec<String> = Vec::new();
         let mut head = 0u64;
         let mut needs_copy = false;
@@ -323,6 +323,9 @@ impl SyncEngine {
                     );
                     current = match merged {
                         BinaryMerge::Unchanged(m) | BinaryMerge::FastForward(m) => m,
+                        BinaryMerge::NeedsResolution => {
+                            return Err(SyncError::ConflictNeedResolution);
+                        }
                         BinaryMerge::Conflict {
                             resolved,
                             needs_copy: nc,
@@ -335,13 +338,13 @@ impl SyncEngine {
             }
             i = j;
         }
-        (
+        Ok((
             TrackedFile {
                 head,
                 state: FileState::Binary { manifest: current },
             },
             needs_copy,
-        )
+        ))
     }
 
     /// Persist a file's state, oplog cache row, and sync cursor atomically.
@@ -420,7 +423,7 @@ impl SyncEngine {
                 *file = rebuilt;
             }
             FileState::Binary { .. } => {
-                let (rebuilt, _copy) = self.build_binary(&entries);
+                let (rebuilt, _copy) = self.build_binary(&entries)?;
                 *file = rebuilt;
             }
         }
@@ -702,7 +705,7 @@ impl SyncEngine {
         let (file, needs_copy) = if is_text {
             (self.build_text(&file_id, &entries)?, false)
         } else {
-            self.build_binary(&entries)
+            self.build_binary(&entries)?
         };
 
         {

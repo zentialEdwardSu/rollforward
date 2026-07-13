@@ -864,7 +864,35 @@ fn bi205_binary_fork_keep_both_requests_copy() {
     assert_eq!(rec.conflict_copies(), vec!["img".to_string()]);
 }
 
-/// BI-206: a zero-byte binary file syncs with an empty manifest and completes.
+/// BI-206: Manual leaves a genuine binary fork entirely untouched so the host
+/// can persist a review task before choosing a policy.
+#[test]
+fn bi206_binary_fork_manual_requires_resolution_without_side_effects() {
+    let (_remote_dir, remote) = shared_remote();
+    let dbs = TempDir::new().unwrap();
+    let (a, rec) = engine_with_policy(
+        "clientA",
+        &dbs,
+        remote.clone(),
+        BinaryConflictPolicy::Manual,
+    );
+
+    a.modify_binary("img".into(), pseudo_bytes(80_000, 30))
+        .unwrap();
+    let local_manifest = a.get_manifest("img".into()).unwrap();
+    inject_fork_entry(&remote, "img", &binary_entry(1, "clientB", &["badf00d"]));
+    let before = remote.list_oplogs("img".into()).unwrap();
+
+    assert!(matches!(
+        a.sync("img".into()),
+        Err(SyncError::ConflictNeedResolution)
+    ));
+    assert_eq!(a.get_manifest("img".into()).unwrap(), local_manifest);
+    assert_eq!(remote.list_oplogs("img".into()).unwrap(), before);
+    assert!(rec.conflict_copies().is_empty());
+}
+
+/// BI-207: a zero-byte binary file syncs with an empty manifest and completes.
 #[test]
 fn bi206_zero_byte_binary() {
     let (_remote_dir, remote) = shared_remote();
