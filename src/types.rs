@@ -111,6 +111,21 @@ pub struct MaintenanceReport {
     pub bytes_reclaimed: u64,
 }
 
+/// One binary update submitted as part of a cross-file upload batch.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct BinaryModification {
+    pub file_id: String,
+    pub data: Vec<u8>,
+}
+
+/// Published result for one member of a binary upload batch.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct BinaryModificationResult {
+    pub file_id: String,
+    pub sequence: u64,
+    pub manifest: Vec<String>,
+}
+
 /// Errors crossing the FFI boundary.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum SyncError {

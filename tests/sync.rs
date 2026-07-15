@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rollforward::types::{
-    BinaryConflictPolicy, BinaryFileState, ChangeType, ChunkInfo, ClientStatus,
+    BinaryConflictPolicy, BinaryFileState, BinaryModification, ChangeType, ChunkInfo, ClientStatus,
     EngineNotificationListener, OpLogEntry, OplogCacheEntry, RemoteLogItem,
 };
 use rollforward::{LocalFolderRemote, LocalStore, RedbStore, RemoteStorage, SyncEngine, SyncError};
@@ -1896,4 +1896,27 @@ fn truncate_many_reports_all_files_and_runs_global_gc() {
     b.sync("two".into()).unwrap();
     assert!(b.read_binary("one".into()).is_ok());
     assert!(b.read_binary("two".into()).is_ok());
+}
+
+#[test]
+fn batch_binary_modifications_share_small_pack() {
+    let (_remote_dir, remote) = shared_remote();
+    let dbs = TempDir::new().unwrap();
+    let (a, _) = engine("clientA", &dbs, remote.clone());
+    let inputs: Vec<BinaryModification> = (0..20)
+        .map(|index| BinaryModification {
+            file_id: format!("item/file-{index}.bin"),
+            data: pseudo_bytes(48_000, 1_000 + index),
+        })
+        .collect();
+    let expected: Vec<Vec<u8>> = inputs.iter().map(|input| input.data.clone()).collect();
+    let results = a.modify_binaries(inputs).unwrap();
+    assert_eq!(results.len(), 20);
+    assert_eq!(remote.list_pack_indexes().unwrap().len(), 1);
+    for (index, bytes) in expected.into_iter().enumerate() {
+        assert_eq!(
+            a.read_binary(format!("item/file-{index}.bin")).unwrap(),
+            bytes
+        );
+    }
 }

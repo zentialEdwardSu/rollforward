@@ -49,8 +49,9 @@ pub use engine::SyncEngine;
 pub use remote::{LocalFolderRemote, RemoteStorage};
 pub use store::{LocalStore, RedbStore};
 pub use types::{
-    BinaryConflictPolicy, BinaryFileState, ChangeType, ChunkInfo, EngineNotificationListener,
-    MaintenanceReport, OpLogEntry, RemoteLogItem, SyncError,
+    BinaryConflictPolicy, BinaryFileState, BinaryModification, BinaryModificationResult,
+    ChangeType, ChunkInfo, EngineNotificationListener, MaintenanceReport, OpLogEntry,
+    RemoteLogItem, SyncError,
 };
 
 /// Assemble a [`SyncEngine`] over the local/test backends: a [`RedbStore`] at

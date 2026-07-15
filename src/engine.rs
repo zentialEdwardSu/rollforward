@@ -30,8 +30,9 @@ use crate::remote::RemoteStorage;
 use crate::store::LocalStore;
 use crate::text::TextDoc;
 use crate::types::{
-    BinaryConflictPolicy, BinaryFileState, ChangeType, EngineNotificationListener,
-    MaintenanceReport, OpLogEntry, OplogCacheEntry, SyncError,
+    BinaryConflictPolicy, BinaryFileState, BinaryModification, BinaryModificationResult,
+    ChangeType, EngineNotificationListener, MaintenanceReport, OpLogEntry, OplogCacheEntry,
+    SyncError,
 };
 
 /// Maximum CAS-retry attempts before giving up on a concurrent write.
@@ -799,6 +800,77 @@ impl SyncEngine {
         drop(files);
         self.listener.on_file_content_updated(file_id);
         Ok(seq)
+    }
+
+    /// Apply several binary edits with one shared chunk-dedup/index pass. New
+    /// chunks from different files are packed together up to the normal pack
+    /// target, which avoids one tiny pack per tiny file. Pack upload completes
+    /// before any manifest oplog is published.
+    pub fn modify_binaries(
+        &self,
+        modifications: Vec<BinaryModification>,
+    ) -> Result<Vec<BinaryModificationResult>, SyncError> {
+        if modifications.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prepared: Vec<(String, Vec<String>, Vec<(crate::types::ChunkInfo, Vec<u8>)>)> =
+            modifications
+                .into_iter()
+                .map(|modification| {
+                    let chunks = binary::chunk_data(&modification.data);
+                    let manifest = chunks.iter().map(|(chunk, _)| chunk.hash.clone()).collect();
+                    (modification.file_id, manifest, chunks)
+                })
+                .collect();
+        let combined: Vec<(crate::types::ChunkInfo, Vec<u8>)> = prepared
+            .iter()
+            .flat_map(|(_, _, chunks)| chunks.iter().cloned())
+            .collect();
+        self.upload_packs(&combined)?;
+
+        let mut files = self.files.write().expect("files lock poisoned");
+        let mut results = Vec::with_capacity(prepared.len());
+        let mut updated = Vec::with_capacity(prepared.len());
+        for (file_id, manifest, _) in prepared {
+            let file = files.entry(file_id.clone()).or_insert_with(|| TrackedFile {
+                head: 0,
+                state: FileState::Binary {
+                    manifest: Vec::new(),
+                    deleted: false,
+                },
+            });
+            if !matches!(file.state, FileState::Binary { .. }) {
+                return Err(SyncError::IoError {
+                    msg: format!("{file_id} is not a binary file"),
+                });
+            }
+            let client_id = self.client_id.clone();
+            let entry = self.publish_with_retry(&file_id, file, |sequence| OpLogEntry {
+                sequence,
+                client_id: client_id.clone(),
+                timestamp: now_millis(),
+                change_type: ChangeType::BinarySnapshot {
+                    chunk_hashes: manifest.clone(),
+                },
+            })?;
+            file.state = FileState::Binary {
+                manifest: manifest.clone(),
+                deleted: false,
+            };
+            self.persist_file(&file_id, file, Some(&entry))?;
+            self.remote.put_status(self.client_id.clone(), file.head)?;
+            results.push(BinaryModificationResult {
+                file_id: file_id.clone(),
+                sequence: entry.sequence,
+                manifest,
+            });
+            updated.push(file_id);
+        }
+        drop(files);
+        for file_id in updated {
+            self.listener.on_file_content_updated(file_id);
+        }
+        Ok(results)
     }
 
     /// Publish a deletion tombstone for a binary file. Repeated deletion of an
