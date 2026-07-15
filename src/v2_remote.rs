@@ -11,8 +11,9 @@ use crate::adapter::RemoteStorageV2;
 use crate::binary::PackIndex;
 use crate::types::SyncError;
 use crate::v2_types::{
-    CatalogCursor, CatalogDelta, CatalogEvent, CatalogScanRequest, ChunkLocation, Commit,
-    CommitBatch, CommitBatchResult, PackRange, RangeData, ResourceAck, ResourceKey,
+    CatalogCompaction, CatalogCursor, CatalogDelta, CatalogEvent, CatalogScanRequest,
+    CatalogSnapshot, ChunkLocation, Commit, CommitBatch, CommitBatchResult, PackRange, RangeData,
+    ResourceAck, ResourceKey,
 };
 
 fn io(error: impl std::fmt::Display) -> SyncError {
@@ -99,6 +100,40 @@ impl LocalFolderRemoteV2 {
     fn acknowledgements(&self) -> PathBuf {
         self.root.join("acknowledgements")
     }
+    fn snapshots(&self) -> PathBuf {
+        self.root.join("catalog").join("snapshots")
+    }
+
+    fn load_snapshots(&self, scopes: &HashSet<String>) -> Result<Vec<CatalogSnapshot>, SyncError> {
+        let latest_files: Vec<_> = files_recursive(&self.snapshots())?
+            .into_iter()
+            .filter(|path| path.file_name().is_some_and(|name| name == "latest.json"))
+            .collect();
+        let mut output = Vec::new();
+        for latest in latest_files {
+            let generation: u64 =
+                serde_json::from_slice(&fs::read(&latest).map_err(io)?).map_err(|error| {
+                    SyncError::SerdeError {
+                        msg: error.to_string(),
+                    }
+                })?;
+            let bytes = fs::read(
+                latest
+                    .parent()
+                    .expect("snapshot latest has a parent")
+                    .join(format!("{generation:020}.json")),
+            )
+            .map_err(io)?;
+            let snapshot: CatalogSnapshot =
+                serde_json::from_slice(&bytes).map_err(|error| SyncError::SerdeError {
+                    msg: error.to_string(),
+                })?;
+            if scopes.is_empty() || scopes.contains(&snapshot.scope_id) {
+                output.push(snapshot);
+            }
+        }
+        Ok(output)
+    }
 }
 
 #[uniffi::export]
@@ -119,6 +154,24 @@ impl RemoteStorageV2 for LocalFolderRemoteV2 {
         let scopes: HashSet<_> = request.scopes.into_iter().collect();
         let mut events = Vec::new();
         let mut next = cursors.clone();
+        let mut covered = BTreeMap::new();
+        for snapshot in self.load_snapshots(&scopes)? {
+            for cursor in snapshot.cursors {
+                let key = (cursor.client_id, cursor.scope_id);
+                covered.insert(key.clone(), cursor.counter);
+                next.entry(key)
+                    .and_modify(|value| *value = (*value).max(cursor.counter))
+                    .or_insert(cursor.counter);
+            }
+            for event in snapshot.events {
+                let key = (event.client_id.clone(), event.resource.scope_id.clone());
+                if event.counter > cursors.get(&key).copied().unwrap_or(0)
+                    && (scopes.is_empty() || scopes.contains(&event.resource.scope_id))
+                {
+                    events.push(event);
+                }
+            }
+        }
         for path in files_recursive(&self.segments())? {
             let segment: CatalogSegment = serde_json::from_slice(&fs::read(path).map_err(io)?)
                 .map_err(|error| SyncError::SerdeError {
@@ -128,7 +181,11 @@ impl RemoteStorageV2 for LocalFolderRemoteV2 {
                 continue;
             }
             let cursor_key = (segment.client_id.clone(), segment.scope_id.clone());
-            let cursor = cursors.get(&cursor_key).copied().unwrap_or(0);
+            let cursor = cursors
+                .get(&cursor_key)
+                .copied()
+                .unwrap_or(0)
+                .max(covered.get(&cursor_key).copied().unwrap_or(0));
             if segment.last_counter <= cursor {
                 continue;
             }
@@ -322,6 +379,67 @@ impl RemoteStorageV2 for LocalFolderRemoteV2 {
         for id in pack_ids {
             let _ = fs::remove_file(self.packs().join(&id));
             let _ = fs::remove_file(self.indexes().join(&id));
+        }
+        Ok(())
+    }
+
+    fn compact_catalog(&self, compaction: CatalogCompaction) -> Result<(), SyncError> {
+        let snapshot_dir = self
+            .snapshots()
+            .join(object_name(&compaction.snapshot.scope_id));
+        fs::create_dir_all(&snapshot_dir).map_err(io)?;
+        let generation = compaction.snapshot.generation;
+        let snapshot_path = snapshot_dir.join(format!("{generation:020}.json"));
+        write_immutable(
+            &snapshot_path,
+            &serde_json::to_vec(&compaction.snapshot).map_err(|error| SyncError::SerdeError {
+                msg: error.to_string(),
+            })?,
+        )?;
+        let latest = snapshot_dir.join("latest.json");
+        let temporary = snapshot_dir.join(format!("latest-{}.tmp", std::process::id()));
+        fs::write(
+            &temporary,
+            serde_json::to_vec(&generation).map_err(|error| SyncError::SerdeError {
+                msg: error.to_string(),
+            })?,
+        )
+        .map_err(io)?;
+        if latest.exists() {
+            fs::remove_file(&latest).map_err(io)?;
+        }
+        fs::rename(temporary, latest).map_err(io)?;
+
+        let covered: BTreeMap<_, _> = compaction
+            .snapshot
+            .cursors
+            .iter()
+            .map(|cursor| {
+                (
+                    (cursor.client_id.clone(), cursor.scope_id.clone()),
+                    cursor.counter,
+                )
+            })
+            .collect();
+        for path in files_recursive(&self.segments())? {
+            let segment: CatalogSegment = serde_json::from_slice(&fs::read(&path).map_err(io)?)
+                .map_err(|error| SyncError::SerdeError {
+                    msg: error.to_string(),
+                })?;
+            if segment.last_counter
+                <= covered
+                    .get(&(segment.client_id, segment.scope_id))
+                    .copied()
+                    .unwrap_or(0)
+            {
+                fs::remove_file(path).map_err(io)?;
+            }
+        }
+        for id in compaction.obsolete_commit_ids {
+            let path = self.commits().join(object_name(&id));
+            if path.exists() {
+                fs::remove_file(path).map_err(io)?;
+            }
         }
         Ok(())
     }

@@ -39,7 +39,14 @@ struct RunJournal {
     operations: Vec<OperationJournal>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredCheckpoint {
+    key: ResourceKey,
+    commit_id: String,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct RuntimeState {
     counter: u64,
     baselines: BTreeMap<String, StoredBaseline>,
@@ -50,6 +57,7 @@ struct RuntimeState {
     text_states: BTreeMap<String, Vec<u8>>,
     active_run: Option<RunJournal>,
     retired_clients: BTreeSet<String>,
+    checkpoints: BTreeMap<String, StoredCheckpoint>,
 }
 
 impl RuntimeState {
@@ -87,6 +95,22 @@ impl RuntimeState {
             .flat_map(|commit| commit.parents.iter().cloned())
             .collect();
         ids.difference(&parents).cloned().collect()
+    }
+
+    fn is_descendant(&self, candidate: &str, ancestor: &str) -> bool {
+        let mut pending = vec![candidate.to_owned()];
+        let mut visited = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if id == ancestor {
+                return true;
+            }
+            if visited.insert(id.clone())
+                && let Some(commit) = self.commits.get(&id)
+            {
+                pending.extend(commit.parents.iter().cloned());
+            }
+        }
+        false
     }
 
     fn remote_keys(&self, scopes: &HashSet<String>) -> BTreeSet<ResourceKey> {
@@ -616,7 +640,7 @@ impl SyncRuntime {
         local: &[LocalResource],
         plan: &SyncPlan,
         run_id: &str,
-    ) -> Result<SyncReport, SyncError> {
+    ) -> Result<(SyncReport, Vec<EngineEvent>), SyncError> {
         let local_by_key: HashMap<_, _> = local
             .iter()
             .map(|resource| (resource.key.clone(), resource))
@@ -626,15 +650,69 @@ impl SyncRuntime {
             ..SyncReport::default()
         };
         let mut failures = HashMap::<String, u64>::new();
-        let mut events = Vec::new();
+        let mut events = vec![EngineEvent {
+            run_id: run_id.into(),
+            operation_id: run_id.into(),
+            stage: "run.start".into(),
+            resource: None,
+            detail_json: serde_json::json!({
+                "scopes": request.scopes.len(),
+                "local_resources": local.len(),
+                "operations": plan.operations.len(),
+            })
+            .to_string(),
+        }];
 
         state
             .conflicts
             .retain(|_, conflict| !request.scopes.contains(&conflict.resource.scope_id));
-        for operation in &plan.operations {
+        for (index, operation) in plan.operations.iter().enumerate() {
+            let operation_id = format!("{run_id}:{index}");
+            let decision = match operation {
+                PlanOperation::Noop { .. } => "noop",
+                PlanOperation::EstablishBaseline { .. } => "establish_baseline",
+                PlanOperation::EstablishDeletedBaseline { .. } => "establish_deleted_baseline",
+                PlanOperation::Upload { .. } => "upload",
+                PlanOperation::Download { .. } => "download",
+                PlanOperation::PublishDelete { .. } => "publish_delete",
+                PlanOperation::ApplyDelete { .. } => "apply_delete",
+                PlanOperation::Conflict { .. } => "conflict",
+            };
+            events.push(EngineEvent {
+                run_id: run_id.into(),
+                operation_id: operation_id.clone(),
+                stage: "resource.scan".into(),
+                resource: Some(operation.key().clone()),
+                detail_json: "{}".into(),
+            });
+            events.push(EngineEvent {
+                run_id: run_id.into(),
+                operation_id: operation_id.clone(),
+                stage: "resource.compare".into(),
+                resource: Some(operation.key().clone()),
+                detail_json: serde_json::json!({"decision": decision}).to_string(),
+            });
+            events.push(EngineEvent {
+                run_id: run_id.into(),
+                operation_id,
+                stage: "resource.decision".into(),
+                resource: Some(operation.key().clone()),
+                detail_json: serde_json::json!({"decision": decision}).to_string(),
+            });
             if let PlanOperation::Conflict { record } = operation {
                 state.conflicts.insert(record.id.clone(), record.clone());
                 report.conflicts += 1;
+                events.push(EngineEvent {
+                    run_id: run_id.into(),
+                    operation_id: record.id.clone(),
+                    stage: "conflict".into(),
+                    resource: Some(record.resource.clone()),
+                    detail_json: serde_json::json!({
+                        "kind": format!("{:?}", record.kind),
+                        "remote_heads": record.remote_heads.len(),
+                    })
+                    .to_string(),
+                });
             }
         }
 
@@ -718,6 +796,21 @@ impl SyncRuntime {
             .filter(|(chunk, _)| !existing.contains(&chunk.hash))
             .collect();
         let built_packs = binary::build_packs(&new_chunks);
+        if !uploads.is_empty() {
+            events.push(EngineEvent {
+                run_id: run_id.into(),
+                operation_id: format!("{run_id}:upload"),
+                stage: "upload.plan".into(),
+                resource: None,
+                detail_json: serde_json::json!({
+                    "resources": uploads.len(),
+                    "packs": built_packs.len(),
+                    "bytes": built_packs.iter().map(|(_, data, _)| data.len() as u64).sum::<u64>(),
+                    "chunks": new_chunks.len(),
+                })
+                .to_string(),
+            });
+        }
         let mut batch = CommitBatch {
             packs: built_packs
                 .iter()
@@ -788,6 +881,17 @@ impl SyncRuntime {
             self.remote.commit_batch(batch)?;
             for (key, commit) in committed_local {
                 state.commits.insert(commit.id.clone(), commit.clone());
+                events.push(EngineEvent {
+                    run_id: run_id.into(),
+                    operation_id: commit.id.clone(),
+                    stage: "commit.catalog".into(),
+                    resource: Some(key.clone()),
+                    detail_json: serde_json::json!({
+                        "commit": &commit.id,
+                        "parents": commit.parents.len(),
+                    })
+                    .to_string(),
+                });
                 let heads = state.heads(&key);
                 match &commit.change {
                     ResourceChange::Delete => {
@@ -846,7 +950,7 @@ impl SyncRuntime {
 
         for operation in &plan.operations {
             let key = operation.key().clone();
-            let outcome = match operation {
+            let outcome: Result<(), SyncError> = (|| match operation {
                 PlanOperation::Noop { .. } => {
                     report.unchanged += 1;
                     Ok(())
@@ -873,6 +977,36 @@ impl SyncRuntime {
                     Ok(())
                 }
                 PlanOperation::Download { remote, .. } => {
+                    let selected = remote.heads().into_iter().next();
+                    if let Some(commit) = selected.as_ref().and_then(|head| state.commits.get(head))
+                        && let ResourceChange::BinarySnapshot {
+                            size, chunk_hashes, ..
+                        } = &commit.change
+                    {
+                        let locations = self.remote.lookup_chunks(chunk_hashes.clone())?;
+                        let mut packs = BTreeMap::<String, (u64, u64)>::new();
+                        for location in locations {
+                            let entry = packs.entry(location.pack_id).or_default();
+                            entry.0 += 1;
+                            entry.1 += u64::from(location.length);
+                        }
+                        events.push(EngineEvent {
+                            run_id: run_id.into(),
+                            operation_id: format!("{run_id}:download"),
+                            stage: "download.plan".into(),
+                            resource: Some(key.clone()),
+                            detail_json: serde_json::json!({
+                                "bytes": size,
+                                "chunks": chunk_hashes.len(),
+                                "packs": packs.iter().map(|(id, (ranges, bytes))| serde_json::json!({
+                                    "pack": &id[..id.len().min(12)],
+                                    "ranges": ranges,
+                                    "bytes": bytes,
+                                })).collect::<Vec<_>>(),
+                            })
+                            .to_string(),
+                        });
+                    }
                     let bytes = self.content_for_remote(state, &key, None)?;
                     let local_state = local_by_key
                         .get(&key)
@@ -905,6 +1039,13 @@ impl SyncRuntime {
                             run_id.into(),
                         );
                         report.downloaded += 1;
+                        events.push(EngineEvent {
+                            run_id: run_id.into(),
+                            operation_id: format!("{run_id}:download"),
+                            stage: "download.write".into(),
+                            resource: Some(operation.key().clone()),
+                            detail_json: serde_json::json!({"bytes": bytes.len()}).to_string(),
+                        });
                         Ok(())
                     }
                 }
@@ -933,13 +1074,20 @@ impl SyncRuntime {
                     } else {
                         Self::set_deleted_baseline(state, key, remote_heads.clone(), run_id.into());
                         report.deleted_local += 1;
+                        events.push(EngineEvent {
+                            run_id: run_id.into(),
+                            operation_id: format!("{run_id}:delete"),
+                            stage: "delete.apply".into(),
+                            resource: Some(operation.key().clone()),
+                            detail_json: "{}".into(),
+                        });
                         Ok(())
                     }
                 }
                 PlanOperation::Upload { .. }
                 | PlanOperation::PublishDelete { .. }
                 | PlanOperation::Conflict { .. } => Ok(()),
-            };
+            })();
             if let Err(error) = outcome {
                 *failures
                     .entry(operation.key().scope_id.clone())
@@ -971,8 +1119,23 @@ impl SyncRuntime {
         state.active_run = None;
         state.save(self.store.as_ref())?;
         report.scopes = Self::report_scopes(request, plan, &failures);
-        self.emit(events);
-        Ok(report)
+        events.push(EngineEvent {
+            run_id: run_id.into(),
+            operation_id: run_id.into(),
+            stage: "run.complete".into(),
+            resource: None,
+            detail_json: serde_json::json!({
+                "uploaded": report.uploaded,
+                "downloaded": report.downloaded,
+                "deleted_remote": report.deleted_remote,
+                "deleted_local": report.deleted_local,
+                "unchanged": report.unchanged,
+                "conflicts": report.conflicts,
+                "failures": report.failures,
+            })
+            .to_string(),
+        });
+        Ok((report, events))
     }
 }
 
@@ -999,16 +1162,20 @@ impl SyncRuntime {
             state.kinds.insert(resource.key.encoded(), resource.kind);
         }
         let plan = self.build_plan(&state, &request.scopes, &local)?;
-        if let Some(previous) = recovered {
-            self.emit(vec![EngineEvent {
-                run_id: run_id.clone(),
-                operation_id: previous.id,
-                stage: "recovery".into(),
-                resource: None,
-                detail_json: "{}".into(),
-            }]);
+        let recovery_event = recovered.map(|previous| EngineEvent {
+            run_id: run_id.clone(),
+            operation_id: previous.id,
+            stage: "recovery".into(),
+            resource: None,
+            detail_json: "{}".into(),
+        });
+        let (report, mut events) = self.execute(&request, &mut state, &local, &plan, &run_id)?;
+        drop(state);
+        if let Some(event) = recovery_event {
+            events.insert(0, event);
         }
-        self.execute(&request, &mut state, &local, &plan, &run_id)
+        self.emit(events);
+        Ok(report)
     }
 
     pub fn list_conflicts(&self, query: ConflictQuery) -> Vec<ConflictRecord> {
@@ -1378,25 +1545,215 @@ impl SyncRuntime {
     }
 
     pub fn maintain(&self, request: MaintenanceRequest) -> Result<V2MaintenanceReport, SyncError> {
-        let state = self.state.lock().expect("runtime state lock poisoned");
+        if request.history_retention_versions == 0 {
+            return Ok(V2MaintenanceReport::default());
+        }
+        let mut state = self.state.lock().expect("runtime state lock poisoned");
+        // A global incremental refresh is required before computing the live
+        // pack set. Cursors keep this proportional to new catalog segments.
+        self.refresh_remote(&mut state, &[])?;
         let scopes: HashSet<_> = request.scopes.into_iter().collect();
         let keys = state.remote_keys(&scopes);
         let mut report = V2MaintenanceReport {
             resources: keys.len() as u64,
             ..V2MaintenanceReport::default()
         };
-        for key in keys {
-            let count = state.resource_commits(&key).len() as u64;
-            if count > request.history_retention_versions
-                || state.heads(&key).len() > 1
+        let acknowledgements = self
+            .remote
+            .list_acknowledgements(keys.iter().cloned().collect())?;
+        let mut obsolete_by_scope = BTreeMap::<String, BTreeSet<String>>::new();
+
+        for key in &keys {
+            let commits = state.resource_commits(key);
+            if commits.len() as u64 <= request.history_retention_versions {
+                state.checkpoints.remove(&key.encoded());
+                continue;
+            }
+            let heads = state.heads(key);
+            let conflicted = heads.len() != 1
                 || state
                     .conflicts
                     .values()
-                    .any(|conflict| conflict.resource == key)
-            {
+                    .any(|conflict| conflict.resource == *key)
+                || state.active_run.as_ref().is_some_and(|run| {
+                    run.operations.iter().any(|operation| operation.key == *key)
+                });
+            let kind = state.kinds.get(&key.encoded()).copied().unwrap_or(
+                match commits.last().map(|commit| &commit.change) {
+                    Some(ResourceChange::TextDelta { .. }) => ResourceKind::Text,
+                    _ => ResourceKind::Binary,
+                },
+            );
+            // Text rollback currently depends on its causal updates. Do not
+            // reclaim it until retained-version checkpoint materialization is
+            // available; binary snapshots and tombstones are self-contained.
+            if conflicted || kind == ResourceKind::Text {
                 report.deferred += 1;
+                continue;
             }
+
+            let checkpoint = state.checkpoints.get(&key.encoded()).cloned();
+            let Some(checkpoint) = checkpoint else {
+                let head = heads[0].clone();
+                let selected =
+                    state
+                        .commits
+                        .get(&head)
+                        .cloned()
+                        .ok_or_else(|| SyncError::IoError {
+                            msg: format!("missing head commit {head}"),
+                        })?;
+                let checkpoint_commit = match selected.change {
+                    ResourceChange::Delete => {
+                        self.publish_delete(&mut state, key.clone(), vec![head])?
+                    }
+                    _ => {
+                        let content = self.content_for_remote(&state, key, Some(&head))?;
+                        self.publish_bytes(
+                            &mut state,
+                            key.clone(),
+                            ResourceKind::Binary,
+                            content,
+                            vec![head],
+                        )?
+                    }
+                };
+                state.checkpoints.insert(
+                    key.encoded(),
+                    StoredCheckpoint {
+                        key: key.clone(),
+                        commit_id: checkpoint_commit.id.clone(),
+                    },
+                );
+                self.remote.write_acknowledgements(vec![ResourceAck {
+                    client_id: self.client_id.clone(),
+                    resource: key.clone(),
+                    observed_heads: vec![checkpoint_commit.id],
+                    pinned_commits: Vec::new(),
+                }])?;
+                report.deferred += 1;
+                continue;
+            };
+
+            let active_clients: BTreeSet<_> = state
+                .resource_commits(key)
+                .into_iter()
+                .map(|commit| commit.author.clone())
+                .filter(|client| !state.retired_clients.contains(client))
+                .chain(std::iter::once(self.client_id.clone()))
+                .collect();
+            let all_acknowledged = active_clients.iter().all(|client| {
+                acknowledgements.iter().any(|ack| {
+                    ack.client_id == *client
+                        && ack.resource == *key
+                        && ack
+                            .observed_heads
+                            .iter()
+                            .any(|head| state.is_descendant(head, &checkpoint.commit_id))
+                })
+            });
+            if !all_acknowledged {
+                report.deferred += 1;
+                continue;
+            }
+
+            let mut ordered: Vec<_> = state
+                .resource_commits(key)
+                .into_iter()
+                .map(|commit| (commit.timestamp, commit.id.clone()))
+                .collect();
+            ordered.sort_by(|left, right| right.cmp(left));
+            let mut retained: BTreeSet<_> = ordered
+                .iter()
+                .take(request.history_retention_versions as usize)
+                .map(|(_, id)| id.clone())
+                .collect();
+            retained.insert(checkpoint.commit_id.clone());
+            for ack in acknowledgements.iter().filter(|ack| ack.resource == *key) {
+                retained.extend(ack.pinned_commits.iter().cloned());
+            }
+            let obsolete = state
+                .resource_commits(key)
+                .into_iter()
+                .filter(|commit| !retained.contains(&commit.id))
+                .map(|commit| commit.id.clone())
+                .collect::<Vec<_>>();
+            if obsolete.is_empty() {
+                state.checkpoints.remove(&key.encoded());
+                continue;
+            }
+            obsolete_by_scope
+                .entry(key.scope_id.clone())
+                .or_default()
+                .extend(obsolete);
         }
+
+        for (scope, obsolete) in &obsolete_by_scope {
+            let retained: Vec<_> = state
+                .commits
+                .values()
+                .filter(|commit| {
+                    commit.resource.scope_id == *scope && !obsolete.contains(&commit.id)
+                })
+                .collect();
+            let events = retained
+                .iter()
+                .map(|commit| CatalogEvent {
+                    client_id: commit.author.clone(),
+                    counter: commit.client_counter,
+                    commit_id: commit.id.clone(),
+                    resource: commit.resource.clone(),
+                })
+                .collect();
+            let cursors = state
+                .cursors
+                .iter()
+                .filter(|cursor| cursor.scope_id == *scope)
+                .cloned()
+                .collect();
+            self.remote.compact_catalog(CatalogCompaction {
+                snapshot: CatalogSnapshot {
+                    generation: now_millis().max(0) as u64,
+                    scope_id: scope.clone(),
+                    events,
+                    cursors,
+                },
+                obsolete_commit_ids: obsolete.iter().cloned().collect(),
+            })?;
+            for id in obsolete {
+                state.commits.remove(id);
+                report.commits_deleted += 1;
+            }
+            state
+                .checkpoints
+                .retain(|_, checkpoint| checkpoint.key.scope_id != *scope);
+        }
+
+        let live_hashes: BTreeSet<_> = state
+            .commits
+            .values()
+            .flat_map(|commit| match &commit.change {
+                ResourceChange::BinarySnapshot { chunk_hashes, .. } => chunk_hashes.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let live_packs: BTreeSet<_> = self
+            .remote
+            .lookup_chunks(live_hashes.into_iter().collect())?
+            .into_iter()
+            .map(|location| location.pack_id)
+            .collect();
+        let dead_packs: Vec<_> = self
+            .remote
+            .list_pack_ids()?
+            .into_iter()
+            .filter(|pack| !live_packs.contains(pack))
+            .collect();
+        if !dead_packs.is_empty() {
+            report.packs_deleted = dead_packs.len() as u64;
+            self.remote.delete_pack_objects(dead_packs)?;
+        }
+        state.save(self.store.as_ref())?;
         Ok(report)
     }
 
@@ -1608,5 +1965,59 @@ mod tests {
         assert_eq!(report.conflicts, 1);
         assert_eq!(report.uploaded, 1);
         assert_eq!(report.scopes[0].status, ScopeStatus::Partial);
+    }
+
+    #[test]
+    fn maintenance_waits_for_checkpoint_ack_then_compacts_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = ResourceKey::new("scope", "history.bin");
+        let local = Arc::new(MemoryReplica::default());
+        local
+            .files
+            .lock()
+            .unwrap()
+            .insert(key.clone(), (b"v0".to_vec(), 1));
+        let engine = runtime(dir.path(), "a", local.clone());
+        for version in 0..6u64 {
+            local.files.lock().unwrap().insert(
+                key.clone(),
+                (format!("v{version}").into_bytes(), version + 1),
+            );
+            engine
+                .reconcile(SyncRequest {
+                    scopes: vec!["scope".into()],
+                })
+                .unwrap();
+        }
+
+        let first = engine
+            .maintain(MaintenanceRequest {
+                scopes: vec!["scope".into()],
+                history_retention_versions: 2,
+            })
+            .unwrap();
+        assert_eq!(first.commits_deleted, 0);
+        assert_eq!(first.deferred, 1);
+
+        engine
+            .reconcile(SyncRequest {
+                scopes: vec!["scope".into()],
+            })
+            .unwrap();
+        let second = engine
+            .maintain(MaintenanceRequest {
+                scopes: vec!["scope".into()],
+                history_retention_versions: 2,
+            })
+            .unwrap();
+        assert!(second.commits_deleted >= 4);
+
+        let fresh = Arc::new(MemoryReplica::default());
+        runtime(dir.path(), "fresh", fresh.clone())
+            .reconcile(SyncRequest {
+                scopes: vec!["scope".into()],
+            })
+            .unwrap();
+        assert_eq!(fresh.files.lock().unwrap()[&key].0, b"v5");
     }
 }

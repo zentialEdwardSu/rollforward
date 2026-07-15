@@ -337,6 +337,23 @@ pub struct CatalogDelta {
     pub cursors: Vec<CatalogCursor>,
 }
 
+/// A self-contained catalog generation used as the visibility boundary for
+/// history truncation. Events contain every commit that remains discoverable;
+/// cursors describe the immutable segments covered by the snapshot.
+#[derive(uniffi::Record, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSnapshot {
+    pub generation: u64,
+    pub scope_id: String,
+    pub events: Vec<CatalogEvent>,
+    pub cursors: Vec<CatalogCursor>,
+}
+
+#[derive(uniffi::Record, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogCompaction {
+    pub snapshot: CatalogSnapshot,
+    pub obsolete_commit_ids: Vec<String>,
+}
+
 #[derive(uniffi::Record, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBatch {
     pub commits: Vec<Commit>,

@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use crate::types::SyncError;
 use crate::v2_types::{
-    CatalogDelta, CatalogScanRequest, ChunkLocation, Commit, CommitBatch, CommitBatchResult,
-    EngineEvent, LocalApplyResult, LocalMutation, LocalResource, PackRange, RangeData, ResourceAck,
-    ResourceContent, ResourceKey,
+    CatalogCompaction, CatalogDelta, CatalogScanRequest, ChunkLocation, Commit, CommitBatch,
+    CommitBatchResult, EngineEvent, LocalApplyResult, LocalMutation, LocalResource, PackRange,
+    RangeData, ResourceAck, ResourceContent, ResourceKey,
 };
 
 #[uniffi::export(with_foreign)]
@@ -33,6 +33,7 @@ pub trait RemoteStorageV2: Send + Sync {
     ) -> Result<Vec<ResourceAck>, SyncError>;
     fn list_pack_ids(&self) -> Result<Vec<String>, SyncError>;
     fn delete_pack_objects(&self, pack_ids: Vec<String>) -> Result<(), SyncError>;
+    fn compact_catalog(&self, compaction: CatalogCompaction) -> Result<(), SyncError>;
 }
 
 #[uniffi::export(with_foreign)]
