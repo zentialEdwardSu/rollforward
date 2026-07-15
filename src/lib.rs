@@ -38,13 +38,11 @@
 pub mod adapter;
 pub mod binary;
 pub mod core;
-pub mod engine;
-pub mod oplog;
-pub mod remote;
+// v1's linear-sequence engine/storage modules are intentionally not linked in
+// v2. Their source remains in-tree temporarily for archaeology only.
 pub mod runtime;
-pub mod store;
 pub mod text;
-pub mod types;
+mod types;
 pub mod v2_remote;
 pub mod v2_store;
 pub mod v2_types;
@@ -52,15 +50,8 @@ pub mod v2_types;
 use std::sync::Arc;
 
 pub use adapter::{EngineEventListenerV2, LocalReplica, NoopEventListenerV2, RemoteStorageV2};
-pub use engine::SyncEngine;
-pub use remote::{LocalFolderRemote, RemoteStorage};
 pub use runtime::SyncRuntime;
-pub use store::{LocalStore, RedbStore};
-pub use types::{
-    BinaryConflictPolicy, BinaryFileState, BinaryModification, BinaryModificationResult,
-    ChangeType, ChunkInfo, EngineNotificationListener, MaintenanceReport, OpLogEntry,
-    RemoteLogItem, SyncError,
-};
+pub use types::SyncError;
 pub use v2_remote::LocalFolderRemoteV2;
 pub use v2_store::{RedbRuntimeStore, RuntimeStore};
 pub use v2_types::*;
@@ -74,6 +65,7 @@ pub use v2_types::*;
 /// callers construct the engine with their own backends via
 /// [`SyncEngine::with_backends`] instead.
 #[uniffi::export]
+#[cfg(any())]
 pub fn new_local(
     client_id: String,
     db_path: String,
@@ -101,6 +93,7 @@ pub fn new_local(
 /// the conflict policy. Call [`SyncEngine::close`] to release the redb file lock
 /// when done.
 #[uniffi::export]
+#[cfg(any())]
 pub fn new_with_remote(
     client_id: String,
     db_path: String,
@@ -126,6 +119,7 @@ pub fn new_with_remote(
 /// exercise conflict scenarios (custom remote, chosen policy) from their own
 /// language.
 #[uniffi::export]
+#[cfg(any())]
 pub fn new_engine(
     client_id: String,
     store: Arc<dyn LocalStore>,
@@ -145,12 +139,14 @@ pub fn new_engine(
 /// Open a [`RedbStore`] at `db_path` as an FFI-usable handle (for hosts wiring
 /// their own engine via [`new_engine`]).
 #[uniffi::export]
+#[cfg(any())]
 pub fn open_redb_store(db_path: String) -> Result<Arc<RedbStore>, SyncError> {
     Ok(Arc::new(RedbStore::open(db_path)?))
 }
 
 /// Open a [`LocalFolderRemote`] rooted at `root` as an FFI-usable handle.
 #[uniffi::export]
+#[cfg(any())]
 pub fn open_local_folder_remote(root: String) -> Result<Arc<LocalFolderRemote>, SyncError> {
     Ok(Arc::new(LocalFolderRemote::new(root)?))
 }

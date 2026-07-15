@@ -757,12 +757,27 @@ impl SyncRuntime {
             .collect();
         let mut all_chunks = Vec::new();
         let mut manifests = HashMap::new();
+        let mut failed_upload_keys = HashSet::new();
         for operation in &uploads {
             if let PlanOperation::Upload { key, local } = operation {
-                let content = contents.get(key).ok_or_else(|| SyncError::IoError {
-                    msg: format!("local replica did not return {}", key.encoded()),
-                })?;
+                let Some(content) = contents.get(key) else {
+                    failed_upload_keys.insert(key.clone());
+                    *failures.entry(key.scope_id.clone()).or_default() += 1;
+                    report.failures += 1;
+                    events.push(EngineEvent {
+                        run_id: run_id.into(),
+                        operation_id: format!("{run_id}:read"),
+                        stage: "error".into(),
+                        resource: Some(key.clone()),
+                        detail_json: serde_json::json!({
+                            "error": "local replica did not return requested content"
+                        })
+                        .to_string(),
+                    });
+                    continue;
+                };
                 if local.version_token() != Some(content.version_token.as_str()) {
+                    failed_upload_keys.insert(key.clone());
                     *failures.entry(key.scope_id.clone()).or_default() += 1;
                     report.failures += 1;
                     continue;
@@ -831,10 +846,7 @@ impl SyncRuntime {
         let mut committed_local = Vec::new();
         for operation in uploads {
             let key = operation.key().clone();
-            if failures.contains_key(&key.scope_id)
-                && !contents.contains_key(&key)
-                && matches!(operation, PlanOperation::Upload { .. })
-            {
+            if failed_upload_keys.contains(&key) {
                 continue;
             }
             let parents = state.heads(&key);
