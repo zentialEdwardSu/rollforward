@@ -335,6 +335,7 @@ pub struct CatalogEvent {
 pub struct CatalogDelta {
     pub events: Vec<CatalogEvent>,
     pub cursors: Vec<CatalogCursor>,
+    pub snapshot_cursors: Vec<CatalogCursor>,
 }
 
 /// A self-contained catalog generation used as the visibility boundary for

@@ -155,8 +155,10 @@ impl RemoteStorageV2 for LocalFolderRemoteV2 {
         let mut events = Vec::new();
         let mut next = cursors.clone();
         let mut covered = BTreeMap::new();
+        let mut snapshot_cursors = Vec::new();
         for snapshot in self.load_snapshots(&scopes)? {
             for cursor in snapshot.cursors {
+                snapshot_cursors.push(cursor.clone());
                 let key = (cursor.client_id, cursor.scope_id);
                 covered.insert(key.clone(), cursor.counter);
                 next.entry(key)
@@ -213,6 +215,7 @@ impl RemoteStorageV2 for LocalFolderRemoteV2 {
                     counter,
                 })
                 .collect(),
+            snapshot_cursors,
         })
     }
 

@@ -58,6 +58,7 @@ struct RuntimeState {
     active_run: Option<RunJournal>,
     retired_clients: BTreeSet<String>,
     checkpoints: BTreeMap<String, StoredCheckpoint>,
+    catalog_events_since_snapshot: BTreeMap<String, u64>,
 }
 
 impl RuntimeState {
@@ -274,6 +275,30 @@ impl SyncRuntime {
             scopes: scopes.to_vec(),
             cursors: state.cursors.clone(),
         })?;
+        let snapshot_coverage: BTreeMap<_, _> = delta
+            .snapshot_cursors
+            .iter()
+            .map(|cursor| {
+                (
+                    (cursor.client_id.clone(), cursor.scope_id.clone()),
+                    cursor.counter,
+                )
+            })
+            .collect();
+        for event in &delta.events {
+            if event.counter
+                <= snapshot_coverage
+                    .get(&(event.client_id.clone(), event.resource.scope_id.clone()))
+                    .copied()
+                    .unwrap_or(0)
+            {
+                continue;
+            }
+            *state
+                .catalog_events_since_snapshot
+                .entry(event.resource.scope_id.clone())
+                .or_default() += 1;
+        }
         let missing: Vec<_> = delta
             .events
             .iter()
@@ -302,6 +327,52 @@ impl SyncRuntime {
                 counter,
             })
             .collect();
+        Ok(())
+    }
+
+    fn snapshot_generation(&self) -> u64 {
+        let millis = now_millis().max(0) as u64;
+        let digest = blake3::hash(self.client_id.as_bytes());
+        let suffix = u16::from_be_bytes([digest.as_bytes()[0], digest.as_bytes()[1]]);
+        (millis << 16) | u64::from(suffix)
+    }
+
+    fn snapshot_large_catalogs(&self, state: &mut RuntimeState) -> Result<(), SyncError> {
+        let due: Vec<_> = state
+            .catalog_events_since_snapshot
+            .iter()
+            .filter(|(_, events)| **events >= 10_000)
+            .map(|(scope, _)| scope.clone())
+            .collect();
+        for scope in due {
+            let events = state
+                .commits
+                .values()
+                .filter(|commit| commit.resource.scope_id == scope)
+                .map(|commit| CatalogEvent {
+                    client_id: commit.author.clone(),
+                    counter: commit.client_counter,
+                    commit_id: commit.id.clone(),
+                    resource: commit.resource.clone(),
+                })
+                .collect();
+            let cursors = state
+                .cursors
+                .iter()
+                .filter(|cursor| cursor.scope_id == scope)
+                .cloned()
+                .collect();
+            self.remote.compact_catalog(CatalogCompaction {
+                snapshot: CatalogSnapshot {
+                    generation: self.snapshot_generation(),
+                    scope_id: scope.clone(),
+                    events,
+                    cursors,
+                },
+                obsolete_commit_ids: Vec::new(),
+            })?;
+            state.catalog_events_since_snapshot.insert(scope, 0);
+        }
         Ok(())
     }
 
@@ -1169,6 +1240,7 @@ impl SyncRuntime {
         let mut state = self.state.lock().expect("runtime state lock poisoned");
         let recovered = state.active_run.take();
         self.refresh_remote(&mut state, &request.scopes)?;
+        self.snapshot_large_catalogs(&mut state)?;
         let local = self.local_inventory(&state, &request.scopes)?;
         for resource in &local {
             state.kinds.insert(resource.key.encoded(), resource.kind);
@@ -1725,7 +1797,7 @@ impl SyncRuntime {
                 .collect();
             self.remote.compact_catalog(CatalogCompaction {
                 snapshot: CatalogSnapshot {
-                    generation: now_millis().max(0) as u64,
+                    generation: self.snapshot_generation(),
                     scope_id: scope.clone(),
                     events,
                     cursors,
