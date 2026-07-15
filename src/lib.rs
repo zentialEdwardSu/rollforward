@@ -35,24 +35,35 @@
     clippy::doc_markdown
 )]
 
+pub mod adapter;
 pub mod binary;
+pub mod core;
 pub mod engine;
 pub mod oplog;
 pub mod remote;
+pub mod runtime;
 pub mod store;
 pub mod text;
 pub mod types;
+pub mod v2_remote;
+pub mod v2_store;
+pub mod v2_types;
 
 use std::sync::Arc;
 
+pub use adapter::{EngineEventListenerV2, LocalReplica, NoopEventListenerV2, RemoteStorageV2};
 pub use engine::SyncEngine;
 pub use remote::{LocalFolderRemote, RemoteStorage};
+pub use runtime::SyncRuntime;
 pub use store::{LocalStore, RedbStore};
 pub use types::{
     BinaryConflictPolicy, BinaryFileState, BinaryModification, BinaryModificationResult,
     ChangeType, ChunkInfo, EngineNotificationListener, MaintenanceReport, OpLogEntry,
     RemoteLogItem, SyncError,
 };
+pub use v2_remote::LocalFolderRemoteV2;
+pub use v2_store::{RedbRuntimeStore, RuntimeStore};
+pub use v2_types::*;
 
 /// Assemble a [`SyncEngine`] over the local/test backends: a [`RedbStore`] at
 /// `db_path` and a [`LocalFolderRemote`] rooted at `remote_root`, with
@@ -142,6 +153,26 @@ pub fn open_redb_store(db_path: String) -> Result<Arc<RedbStore>, SyncError> {
 #[uniffi::export]
 pub fn open_local_folder_remote(root: String) -> Result<Arc<LocalFolderRemote>, SyncError> {
     Ok(Arc::new(LocalFolderRemote::new(root)?))
+}
+
+/// Construct the complete v2 synchronization runtime over injected adapters.
+#[uniffi::export]
+pub fn new_runtime(
+    client_id: String,
+    store: Arc<dyn RuntimeStore>,
+    remote: Arc<dyn RemoteStorageV2>,
+    local: Arc<dyn LocalReplica>,
+    listener: Arc<dyn EngineEventListenerV2>,
+) -> Result<Arc<SyncRuntime>, SyncError> {
+    Ok(Arc::new(SyncRuntime::with_backends(
+        client_id, store, remote, local, listener,
+    )?))
+}
+
+/// Open the isolated v2 redb state database used by the runtime.
+#[uniffi::export]
+pub fn open_redb_runtime_store(path: String) -> Result<Arc<RedbRuntimeStore>, SyncError> {
+    Ok(Arc::new(RedbRuntimeStore::open(path)?))
 }
 
 uniffi::setup_scaffolding!();

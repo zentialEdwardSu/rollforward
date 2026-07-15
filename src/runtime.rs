@@ -1,0 +1,1612 @@
+//! V2 synchronization runtime: inventory, planning, execution, and recovery.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+
+use serde::{Deserialize, Serialize};
+
+use crate::adapter::{EngineEventListenerV2, LocalReplica, RemoteStorageV2};
+use crate::binary;
+use crate::core::plan_inventory;
+use crate::text::TextDoc;
+use crate::types::SyncError;
+use crate::v2_store::RuntimeStore;
+use crate::v2_types::*;
+
+fn serde_error(error: impl std::fmt::Display) -> SyncError {
+    SyncError::SerdeError {
+        msg: error.to_string(),
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredBaseline {
+    key: ResourceKey,
+    state: BaselineState,
+    last_operation_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OperationJournal {
+    id: String,
+    key: ResourceKey,
+    stage: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RunJournal {
+    id: String,
+    operations: Vec<OperationJournal>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct RuntimeState {
+    counter: u64,
+    baselines: BTreeMap<String, StoredBaseline>,
+    commits: BTreeMap<String, Commit>,
+    cursors: Vec<CatalogCursor>,
+    conflicts: BTreeMap<String, ConflictRecord>,
+    kinds: BTreeMap<String, ResourceKind>,
+    text_states: BTreeMap<String, Vec<u8>>,
+    active_run: Option<RunJournal>,
+    retired_clients: BTreeSet<String>,
+}
+
+impl RuntimeState {
+    fn load(store: &dyn RuntimeStore) -> Result<Self, SyncError> {
+        store.load_runtime_state()?.map_or_else(
+            || Ok(Self::default()),
+            |bytes| serde_json::from_slice(&bytes).map_err(serde_error),
+        )
+    }
+
+    fn save(&self, store: &dyn RuntimeStore) -> Result<(), SyncError> {
+        store.save_runtime_state(serde_json::to_vec(self).map_err(serde_error)?)
+    }
+
+    fn baseline_pairs(&self, scopes: &HashSet<String>) -> Vec<(ResourceKey, BaselineState)> {
+        self.baselines
+            .values()
+            .filter(|entry| scopes.is_empty() || scopes.contains(&entry.key.scope_id))
+            .map(|entry| (entry.key.clone(), entry.state.clone()))
+            .collect()
+    }
+
+    fn resource_commits(&self, key: &ResourceKey) -> Vec<&Commit> {
+        self.commits
+            .values()
+            .filter(|commit| &commit.resource == key)
+            .collect()
+    }
+
+    fn heads(&self, key: &ResourceKey) -> Vec<String> {
+        let commits = self.resource_commits(key);
+        let ids: BTreeSet<_> = commits.iter().map(|commit| commit.id.clone()).collect();
+        let parents: BTreeSet<_> = commits
+            .iter()
+            .flat_map(|commit| commit.parents.iter().cloned())
+            .collect();
+        ids.difference(&parents).cloned().collect()
+    }
+
+    fn remote_keys(&self, scopes: &HashSet<String>) -> BTreeSet<ResourceKey> {
+        self.commits
+            .values()
+            .filter(|commit| scopes.is_empty() || scopes.contains(&commit.resource.scope_id))
+            .map(|commit| commit.resource.clone())
+            .collect()
+    }
+
+    fn text_doc(&self, key: &ResourceKey) -> Result<TextDoc, SyncError> {
+        let mut deltas: Vec<(String, Vec<u8>)> = self
+            .resource_commits(key)
+            .into_iter()
+            .filter_map(|commit| match &commit.change {
+                ResourceChange::TextDelta { delta } => Some((commit.id.clone(), delta.clone())),
+                _ => None,
+            })
+            .collect();
+        deltas.sort_by(|left, right| left.0.cmp(&right.0));
+        TextDoc::from_baseline_and_deltas(
+            None,
+            &deltas
+                .into_iter()
+                .map(|(_, delta)| delta)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn text_doc_at(&self, key: &ResourceKey, head: &str) -> Result<TextDoc, SyncError> {
+        let mut reachable = BTreeSet::new();
+        let mut pending = vec![head.to_owned()];
+        while let Some(id) = pending.pop() {
+            if !reachable.insert(id.clone()) {
+                continue;
+            }
+            if let Some(commit) = self
+                .commits
+                .get(&id)
+                .filter(|commit| &commit.resource == key)
+            {
+                pending.extend(commit.parents.iter().cloned());
+            }
+        }
+        let mut deltas: Vec<_> = reachable
+            .into_iter()
+            .filter_map(|id| {
+                self.commits
+                    .get(&id)
+                    .and_then(|commit| match &commit.change {
+                        ResourceChange::TextDelta { delta } => Some((id, delta.clone())),
+                        _ => None,
+                    })
+            })
+            .collect();
+        deltas.sort_by(|left, right| left.0.cmp(&right.0));
+        TextDoc::from_baseline_and_deltas(
+            None,
+            &deltas
+                .into_iter()
+                .map(|(_, delta)| delta)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn remote_state(&self, key: &ResourceKey) -> Result<RemoteResourceState, SyncError> {
+        let heads = self.heads(key);
+        if heads.is_empty() {
+            return Ok(RemoteResourceState::Missing);
+        }
+        let changes: Vec<_> = heads
+            .iter()
+            .filter_map(|id| self.commits.get(id).map(|commit| &commit.change))
+            .collect();
+        if changes
+            .iter()
+            .all(|change| matches!(change, ResourceChange::Delete))
+        {
+            return Ok(RemoteResourceState::Deleted { heads });
+        }
+        if changes
+            .iter()
+            .all(|change| matches!(change, ResourceChange::TextDelta { .. }))
+        {
+            let text = self.text_doc(key)?.content();
+            return Ok(RemoteResourceState::present(
+                blake3::hash(text.as_bytes()).to_hex().to_string(),
+                text.len() as u64,
+                heads,
+            ));
+        }
+        let snapshots: Vec<_> = changes
+            .iter()
+            .filter_map(|change| match change {
+                ResourceChange::BinarySnapshot {
+                    content_id, size, ..
+                } => Some((content_id.as_str(), *size)),
+                _ => None,
+            })
+            .collect();
+        if snapshots.len() == changes.len() && snapshots.iter().all(|value| value == &snapshots[0])
+        {
+            return Ok(RemoteResourceState::present(
+                snapshots[0].0,
+                snapshots[0].1,
+                heads,
+            ));
+        }
+        Ok(RemoteResourceState::Forked { heads })
+    }
+
+    fn remote_pairs(
+        &self,
+        scopes: &HashSet<String>,
+    ) -> Result<Vec<(ResourceKey, RemoteResourceState)>, SyncError> {
+        self.remote_keys(scopes)
+            .into_iter()
+            .map(|key| Ok((key.clone(), self.remote_state(&key)?)))
+            .collect()
+    }
+}
+
+/// Complete v2 synchronization engine.
+#[derive(uniffi::Object)]
+pub struct SyncRuntime {
+    client_id: String,
+    local: Arc<dyn LocalReplica>,
+    remote: Arc<dyn RemoteStorageV2>,
+    store: Arc<dyn RuntimeStore>,
+    listener: Arc<dyn EngineEventListenerV2>,
+    state: Mutex<RuntimeState>,
+}
+
+impl SyncRuntime {
+    pub fn with_backends(
+        client_id: String,
+        store: Arc<dyn RuntimeStore>,
+        remote: Arc<dyn RemoteStorageV2>,
+        local: Arc<dyn LocalReplica>,
+        listener: Arc<dyn EngineEventListenerV2>,
+    ) -> Result<Self, SyncError> {
+        let state = RuntimeState::load(store.as_ref())?;
+        Ok(Self {
+            client_id,
+            local,
+            remote,
+            store,
+            listener,
+            state: Mutex::new(state),
+        })
+    }
+
+    fn emit(&self, events: Vec<EngineEvent>) {
+        if !events.is_empty() {
+            self.listener.on_events(events);
+        }
+    }
+
+    fn refresh_remote(&self, state: &mut RuntimeState, scopes: &[String]) -> Result<(), SyncError> {
+        let delta = self.remote.scan_catalog(CatalogScanRequest {
+            scopes: scopes.to_vec(),
+            cursors: state.cursors.clone(),
+        })?;
+        let missing: Vec<_> = delta
+            .events
+            .iter()
+            .filter(|event| !state.commits.contains_key(&event.commit_id))
+            .map(|event| event.commit_id.clone())
+            .collect();
+        for commit in self.remote.load_commits(missing)? {
+            state.commits.insert(commit.id.clone(), commit);
+        }
+        let mut cursors: BTreeMap<(String, String), u64> = state
+            .cursors
+            .drain(..)
+            .map(|cursor| ((cursor.client_id, cursor.scope_id), cursor.counter))
+            .collect();
+        for cursor in delta.cursors {
+            cursors
+                .entry((cursor.client_id, cursor.scope_id))
+                .and_modify(|counter| *counter = (*counter).max(cursor.counter))
+                .or_insert(cursor.counter);
+        }
+        state.cursors = cursors
+            .into_iter()
+            .map(|((client_id, scope_id), counter)| CatalogCursor {
+                client_id,
+                scope_id,
+                counter,
+            })
+            .collect();
+        Ok(())
+    }
+
+    fn local_inventory(
+        &self,
+        state: &RuntimeState,
+        scopes: &[String],
+    ) -> Result<Vec<LocalResource>, SyncError> {
+        let mut resources = self.local.list_resources(scopes.to_vec())?;
+        let mut reads = Vec::new();
+        for resource in &mut resources {
+            if let ReplicaState::Present {
+                content_id,
+                version_token,
+                ..
+            } = &mut resource.state
+                && content_id.is_empty()
+            {
+                let cached = state
+                    .baselines
+                    .get(&resource.key.encoded())
+                    .and_then(|entry| match &entry.state {
+                        BaselineState::Present {
+                            content_id,
+                            local_version,
+                            ..
+                        } if local_version == version_token => Some(content_id.clone()),
+                        _ => None,
+                    });
+                if let Some(cached) = cached {
+                    *content_id = cached;
+                } else {
+                    reads.push(resource.key.clone());
+                }
+            }
+        }
+        if !reads.is_empty() {
+            let contents: HashMap<_, _> = self
+                .local
+                .read_resources(reads)?
+                .into_iter()
+                .map(|content| (content.key.clone(), content))
+                .collect();
+            for resource in &mut resources {
+                if let ReplicaState::Present {
+                    content_id, size, ..
+                } = &mut resource.state
+                    && content_id.is_empty()
+                {
+                    let content =
+                        contents
+                            .get(&resource.key)
+                            .ok_or_else(|| SyncError::IoError {
+                                msg: format!(
+                                    "local replica did not return {}",
+                                    resource.key.encoded()
+                                ),
+                            })?;
+                    *content_id = blake3::hash(&content.data).to_hex().to_string();
+                    *size = content.data.len() as u64;
+                }
+            }
+        }
+        Ok(resources)
+    }
+
+    fn build_plan(
+        &self,
+        state: &RuntimeState,
+        scopes: &[String],
+        local: &[LocalResource],
+    ) -> Result<SyncPlan, SyncError> {
+        let scope_set: HashSet<_> = scopes.iter().cloned().collect();
+        let mut plan = plan_inventory(
+            local
+                .iter()
+                .map(|resource| (resource.key.clone(), resource.state.clone()))
+                .collect(),
+            state.baseline_pairs(&scope_set),
+            state.remote_pairs(&scope_set)?,
+        );
+        let kinds: HashMap<_, _> = local
+            .iter()
+            .map(|resource| (resource.key.clone(), resource.kind))
+            .collect();
+        for operation in &mut plan.operations {
+            if let PlanOperation::Conflict { record } = operation
+                && record.kind == ConflictKind::ContentVsContent
+                && kinds.get(&record.resource) == Some(&ResourceKind::Text)
+            {
+                if let Some(resource) = local
+                    .iter()
+                    .find(|resource| resource.key == record.resource)
+                {
+                    *operation = PlanOperation::Upload {
+                        key: resource.key.clone(),
+                        local: resource.state.clone(),
+                    };
+                }
+            }
+        }
+        Ok(plan)
+    }
+
+    fn content_for_remote(
+        &self,
+        state: &RuntimeState,
+        key: &ResourceKey,
+        selected_head: Option<&str>,
+    ) -> Result<Vec<u8>, SyncError> {
+        let heads = state.heads(key);
+        let head = selected_head
+            .map(str::to_owned)
+            .or_else(|| heads.first().cloned())
+            .ok_or_else(|| SyncError::IoError {
+                msg: format!("remote resource {} has no head", key.encoded()),
+            })?;
+        let commit = state.commits.get(&head).ok_or_else(|| SyncError::IoError {
+            msg: format!("missing commit {head}"),
+        })?;
+        match &commit.change {
+            ResourceChange::Delete => Err(SyncError::IoError {
+                msg: format!("{} is deleted", key.encoded()),
+            }),
+            ResourceChange::TextDelta { .. } => {
+                Ok(state.text_doc_at(key, &head)?.content().into_bytes())
+            }
+            ResourceChange::BinarySnapshot { chunk_hashes, .. } => {
+                let locations: HashMap<_, _> = self
+                    .remote
+                    .lookup_chunks(chunk_hashes.clone())?
+                    .into_iter()
+                    .map(|location| (location.hash.clone(), location))
+                    .collect();
+                let ranges: Vec<_> = chunk_hashes
+                    .iter()
+                    .map(|hash| {
+                        let location = locations.get(hash).ok_or_else(|| SyncError::IoError {
+                            msg: format!("chunk {hash} is missing"),
+                        })?;
+                        Ok(PackRange {
+                            hash: hash.clone(),
+                            pack_id: location.pack_id.clone(),
+                            offset: location.offset,
+                            length: location.length,
+                        })
+                    })
+                    .collect::<Result<_, SyncError>>()?;
+                let chunks: HashMap<_, _> = self
+                    .remote
+                    .read_ranges(ranges)?
+                    .into_iter()
+                    .map(|range| (range.hash, range.data))
+                    .collect();
+                let mut output = Vec::new();
+                for hash in chunk_hashes {
+                    output.extend_from_slice(chunks.get(hash).ok_or_else(|| {
+                        SyncError::IoError {
+                            msg: format!("range {hash} was not returned"),
+                        }
+                    })?);
+                }
+                Ok(output)
+            }
+        }
+    }
+
+    fn next_counter(state: &mut RuntimeState) -> u64 {
+        state.counter += 1;
+        state.counter
+    }
+
+    fn publish_bytes(
+        &self,
+        state: &mut RuntimeState,
+        key: ResourceKey,
+        kind: ResourceKind,
+        data: Vec<u8>,
+        parents: Vec<String>,
+    ) -> Result<Commit, SyncError> {
+        let counter = Self::next_counter(state);
+        let mut batch = CommitBatch::default();
+        let change = match kind {
+            ResourceKind::Binary => {
+                let chunks = binary::chunk_data(&data);
+                let existing: HashSet<_> = self
+                    .remote
+                    .lookup_chunks(chunks.iter().map(|(chunk, _)| chunk.hash.clone()).collect())?
+                    .into_iter()
+                    .map(|location| location.hash)
+                    .collect();
+                let missing: Vec<_> = chunks
+                    .iter()
+                    .filter(|(chunk, _)| !existing.contains(&chunk.hash))
+                    .cloned()
+                    .collect();
+                for (id, bytes, index) in binary::build_packs(&missing) {
+                    batch.packs.push(PackObject {
+                        id: id.clone(),
+                        data: bytes,
+                    });
+                    batch.indexes.push(PackIndexObject {
+                        id,
+                        data: serde_json::to_vec(&index).map_err(serde_error)?,
+                    });
+                }
+                ResourceChange::BinarySnapshot {
+                    content_id: blake3::hash(&data).to_hex().to_string(),
+                    size: data.len() as u64,
+                    chunk_hashes: chunks.into_iter().map(|(chunk, _)| chunk.hash).collect(),
+                }
+            }
+            ResourceKind::Text => {
+                let mut document = state.text_doc(&key)?;
+                let text = std::str::from_utf8(&data).map_err(serde_error)?;
+                ResourceChange::TextDelta {
+                    delta: document.set_text(text),
+                }
+            }
+        };
+        let commit = Commit::create(key, parents, self.client_id.clone(), counter, change);
+        batch.commits.push(commit.clone());
+        self.remote.commit_batch(batch)?;
+        state.commits.insert(commit.id.clone(), commit.clone());
+        Ok(commit)
+    }
+
+    fn publish_delete(
+        &self,
+        state: &mut RuntimeState,
+        key: ResourceKey,
+        parents: Vec<String>,
+    ) -> Result<Commit, SyncError> {
+        let commit = Commit::create(
+            key,
+            parents,
+            self.client_id.clone(),
+            Self::next_counter(state),
+            ResourceChange::Delete,
+        );
+        self.remote.commit_batch(CommitBatch {
+            commits: vec![commit.clone()],
+            ..CommitBatch::default()
+        })?;
+        state.commits.insert(commit.id.clone(), commit.clone());
+        Ok(commit)
+    }
+
+    fn precondition(local: &ReplicaState) -> MutationPrecondition {
+        local
+            .version_token()
+            .map_or(MutationPrecondition::Missing, |token| {
+                MutationPrecondition::Version {
+                    version_token: token.to_owned(),
+                }
+            })
+    }
+
+    fn set_present_baseline(
+        state: &mut RuntimeState,
+        key: ResourceKey,
+        content_id: String,
+        local_version: String,
+        remote_heads: Vec<String>,
+        operation_id: String,
+    ) {
+        state.baselines.insert(
+            key.encoded(),
+            StoredBaseline {
+                key,
+                state: BaselineState::Present {
+                    content_id,
+                    local_version,
+                    remote_heads,
+                },
+                last_operation_id: operation_id,
+            },
+        );
+    }
+
+    fn set_deleted_baseline(
+        state: &mut RuntimeState,
+        key: ResourceKey,
+        remote_heads: Vec<String>,
+        operation_id: String,
+    ) {
+        state.baselines.insert(
+            key.encoded(),
+            StoredBaseline {
+                key,
+                state: BaselineState::Deleted { remote_heads },
+                last_operation_id: operation_id,
+            },
+        );
+    }
+
+    fn report_scopes(
+        request: &SyncRequest,
+        plan: &SyncPlan,
+        failures: &HashMap<String, u64>,
+    ) -> Vec<ScopeReport> {
+        request
+            .scopes
+            .iter()
+            .map(|scope| {
+                let conflicts = plan
+                    .operations
+                    .iter()
+                    .filter(|operation| {
+                        operation.key().scope_id == *scope
+                            && matches!(operation, PlanOperation::Conflict { .. })
+                    })
+                    .count() as u64;
+                let failed = failures.get(scope).copied().unwrap_or(0);
+                let status = if failed > 0 {
+                    ScopeStatus::Failed
+                } else if conflicts > 0 {
+                    ScopeStatus::Partial
+                } else {
+                    ScopeStatus::Complete
+                };
+                ScopeReport {
+                    scope_id: scope.clone(),
+                    status,
+                    conflicts,
+                    failures: failed,
+                }
+            })
+            .collect()
+    }
+
+    fn execute(
+        &self,
+        request: &SyncRequest,
+        state: &mut RuntimeState,
+        local: &[LocalResource],
+        plan: &SyncPlan,
+        run_id: &str,
+    ) -> Result<SyncReport, SyncError> {
+        let local_by_key: HashMap<_, _> = local
+            .iter()
+            .map(|resource| (resource.key.clone(), resource))
+            .collect();
+        let mut report = SyncReport {
+            run_id: run_id.to_owned(),
+            ..SyncReport::default()
+        };
+        let mut failures = HashMap::<String, u64>::new();
+        let mut events = Vec::new();
+
+        state
+            .conflicts
+            .retain(|_, conflict| !request.scopes.contains(&conflict.resource.scope_id));
+        for operation in &plan.operations {
+            if let PlanOperation::Conflict { record } = operation {
+                state.conflicts.insert(record.id.clone(), record.clone());
+                report.conflicts += 1;
+            }
+        }
+
+        let journal = RunJournal {
+            id: run_id.to_owned(),
+            operations: plan
+                .operations
+                .iter()
+                .enumerate()
+                .map(|(index, operation)| OperationJournal {
+                    id: format!("{run_id}:{index}"),
+                    key: operation.key().clone(),
+                    stage: "planned".into(),
+                })
+                .collect(),
+        };
+        state.active_run = Some(journal);
+        state.save(self.store.as_ref())?;
+
+        let uploads: Vec<_> = plan
+            .operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    PlanOperation::Upload { .. } | PlanOperation::PublishDelete { .. }
+                )
+            })
+            .collect();
+        let upload_keys: Vec<_> = uploads
+            .iter()
+            .filter_map(|operation| match operation {
+                PlanOperation::Upload { key, .. } => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        let contents: HashMap<_, _> = self
+            .local
+            .read_resources(upload_keys)?
+            .into_iter()
+            .map(|content| (content.key.clone(), content))
+            .collect();
+        let mut all_chunks = Vec::new();
+        let mut manifests = HashMap::new();
+        for operation in &uploads {
+            if let PlanOperation::Upload { key, local } = operation {
+                let content = contents.get(key).ok_or_else(|| SyncError::IoError {
+                    msg: format!("local replica did not return {}", key.encoded()),
+                })?;
+                if local.version_token() != Some(content.version_token.as_str()) {
+                    *failures.entry(key.scope_id.clone()).or_default() += 1;
+                    report.failures += 1;
+                    continue;
+                }
+                if content.kind == ResourceKind::Binary {
+                    let chunks = binary::chunk_data(&content.data);
+                    manifests.insert(
+                        key.clone(),
+                        chunks
+                            .iter()
+                            .map(|(chunk, _)| chunk.hash.clone())
+                            .collect::<Vec<_>>(),
+                    );
+                    all_chunks.extend(chunks);
+                }
+            }
+        }
+        let existing: HashSet<_> = self
+            .remote
+            .lookup_chunks(
+                all_chunks
+                    .iter()
+                    .map(|(chunk, _)| chunk.hash.clone())
+                    .collect(),
+            )?
+            .into_iter()
+            .map(|location| location.hash)
+            .collect();
+        let new_chunks: Vec<_> = all_chunks
+            .into_iter()
+            .filter(|(chunk, _)| !existing.contains(&chunk.hash))
+            .collect();
+        let built_packs = binary::build_packs(&new_chunks);
+        let mut batch = CommitBatch {
+            packs: built_packs
+                .iter()
+                .map(|(id, data, _)| PackObject {
+                    id: id.clone(),
+                    data: data.clone(),
+                })
+                .collect(),
+            indexes: built_packs
+                .iter()
+                .map(|(id, _, index)| PackIndexObject {
+                    id: id.clone(),
+                    data: serde_json::to_vec(index).unwrap_or_default(),
+                })
+                .collect(),
+            ..CommitBatch::default()
+        };
+        let mut committed_local = Vec::new();
+        for operation in uploads {
+            let key = operation.key().clone();
+            if failures.contains_key(&key.scope_id)
+                && !contents.contains_key(&key)
+                && matches!(operation, PlanOperation::Upload { .. })
+            {
+                continue;
+            }
+            let parents = state.heads(&key);
+            let counter = Self::next_counter(state);
+            let change = match operation {
+                PlanOperation::PublishDelete { .. } => ResourceChange::Delete,
+                PlanOperation::Upload { .. } => {
+                    let content = &contents[&key];
+                    match content.kind {
+                        ResourceKind::Binary => ResourceChange::BinarySnapshot {
+                            content_id: blake3::hash(&content.data).to_hex().to_string(),
+                            size: content.data.len() as u64,
+                            chunk_hashes: manifests.remove(&key).unwrap_or_default(),
+                        },
+                        ResourceKind::Text => {
+                            let mut doc = state
+                                .baselines
+                                .get(&key.encoded())
+                                .and_then(|_| state.text_states.get(&key.encoded()))
+                                .map_or_else(
+                                    || Ok(TextDoc::new()),
+                                    |full| TextDoc::from_baseline_and_deltas(Some(full), &[]),
+                                )?;
+                            let text = std::str::from_utf8(&content.data).map_err(serde_error)?;
+                            ResourceChange::TextDelta {
+                                delta: doc.set_text(text),
+                            }
+                        }
+                    }
+                }
+                _ => continue,
+            };
+            let commit = Commit::create(
+                key.clone(),
+                parents,
+                self.client_id.clone(),
+                counter,
+                change,
+            );
+            committed_local.push((key, commit.clone()));
+            batch.commits.push(commit);
+        }
+        if !batch.commits.is_empty() || !batch.packs.is_empty() {
+            self.remote.commit_batch(batch)?;
+            for (key, commit) in committed_local {
+                state.commits.insert(commit.id.clone(), commit.clone());
+                let heads = state.heads(&key);
+                match &commit.change {
+                    ResourceChange::Delete => {
+                        Self::set_deleted_baseline(state, key.clone(), heads, run_id.into());
+                        report.deleted_remote += 1;
+                    }
+                    ResourceChange::BinarySnapshot { content_id, .. } => {
+                        let local_resource = local_by_key[&key];
+                        Self::set_present_baseline(
+                            state,
+                            key.clone(),
+                            content_id.clone(),
+                            local_resource
+                                .state
+                                .version_token()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            heads,
+                            run_id.into(),
+                        );
+                        report.uploaded += 1;
+                    }
+                    ResourceChange::TextDelta { .. } => {
+                        let merged = state.text_doc(&key)?;
+                        let bytes = merged.content().into_bytes();
+                        let current = local_by_key[&key];
+                        let results =
+                            self.local
+                                .apply_mutations(vec![LocalMutation::WritePresent {
+                                    key: key.clone(),
+                                    data: bytes.clone(),
+                                    precondition: Self::precondition(&current.state),
+                                }])?;
+                        if let Some(result) = results
+                            .first()
+                            .filter(|result| result.status == ApplyStatus::Applied)
+                        {
+                            state
+                                .text_states
+                                .insert(key.encoded(), merged.full_update());
+                            Self::set_present_baseline(
+                                state,
+                                key.clone(),
+                                blake3::hash(&bytes).to_hex().to_string(),
+                                result.version_token.clone().unwrap_or_default(),
+                                heads,
+                                run_id.into(),
+                            );
+                            report.uploaded += 1;
+                        }
+                    }
+                }
+            }
+            state.save(self.store.as_ref())?;
+        }
+
+        for operation in &plan.operations {
+            let key = operation.key().clone();
+            let outcome = match operation {
+                PlanOperation::Noop { .. } => {
+                    report.unchanged += 1;
+                    Ok(())
+                }
+                PlanOperation::EstablishBaseline {
+                    local,
+                    remote_heads,
+                    ..
+                } => {
+                    Self::set_present_baseline(
+                        state,
+                        key,
+                        local.content_id().unwrap_or_default().to_owned(),
+                        local.version_token().unwrap_or_default().to_owned(),
+                        remote_heads.clone(),
+                        run_id.into(),
+                    );
+                    report.unchanged += 1;
+                    Ok(())
+                }
+                PlanOperation::EstablishDeletedBaseline { remote_heads, .. } => {
+                    Self::set_deleted_baseline(state, key, remote_heads.clone(), run_id.into());
+                    report.unchanged += 1;
+                    Ok(())
+                }
+                PlanOperation::Download { remote, .. } => {
+                    let bytes = self.content_for_remote(state, &key, None)?;
+                    let local_state = local_by_key
+                        .get(&key)
+                        .map_or(ReplicaState::Missing, |resource| resource.state.clone());
+                    let result = self
+                        .local
+                        .apply_mutations(vec![LocalMutation::WritePresent {
+                            key: key.clone(),
+                            data: bytes.clone(),
+                            precondition: Self::precondition(&local_state),
+                        }])?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| SyncError::IoError {
+                            msg: "local replica returned no apply result".into(),
+                        })?;
+                    if result.status != ApplyStatus::Applied {
+                        Err(SyncError::IoError {
+                            msg: result
+                                .error
+                                .unwrap_or_else(|| "local precondition failed".into()),
+                        })
+                    } else {
+                        Self::set_present_baseline(
+                            state,
+                            key,
+                            remote.content_id().unwrap_or_default().to_owned(),
+                            result.version_token.unwrap_or_default(),
+                            remote.heads(),
+                            run_id.into(),
+                        );
+                        report.downloaded += 1;
+                        Ok(())
+                    }
+                }
+                PlanOperation::ApplyDelete {
+                    local,
+                    remote_heads,
+                    ..
+                } => {
+                    let result = self
+                        .local
+                        .apply_mutations(vec![LocalMutation::ApplyDelete {
+                            key: key.clone(),
+                            precondition: Self::precondition(local),
+                        }])?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| SyncError::IoError {
+                            msg: "local replica returned no delete result".into(),
+                        })?;
+                    if result.status != ApplyStatus::Applied {
+                        Err(SyncError::IoError {
+                            msg: result
+                                .error
+                                .unwrap_or_else(|| "local delete precondition failed".into()),
+                        })
+                    } else {
+                        Self::set_deleted_baseline(state, key, remote_heads.clone(), run_id.into());
+                        report.deleted_local += 1;
+                        Ok(())
+                    }
+                }
+                PlanOperation::Upload { .. }
+                | PlanOperation::PublishDelete { .. }
+                | PlanOperation::Conflict { .. } => Ok(()),
+            };
+            if let Err(error) = outcome {
+                *failures
+                    .entry(operation.key().scope_id.clone())
+                    .or_default() += 1;
+                report.failures += 1;
+                events.push(EngineEvent {
+                    run_id: run_id.into(),
+                    operation_id: run_id.into(),
+                    stage: "error".into(),
+                    resource: Some(operation.key().clone()),
+                    detail_json: serde_json::json!({"error": error.to_string()}).to_string(),
+                });
+            }
+            state.save(self.store.as_ref())?;
+        }
+
+        let acknowledgements: Vec<_> = plan
+            .operations
+            .iter()
+            .filter(|operation| !matches!(operation, PlanOperation::Conflict { .. }))
+            .map(|operation| ResourceAck {
+                client_id: self.client_id.clone(),
+                resource: operation.key().clone(),
+                observed_heads: state.heads(operation.key()),
+                pinned_commits: Vec::new(),
+            })
+            .collect();
+        self.remote.write_acknowledgements(acknowledgements)?;
+        state.active_run = None;
+        state.save(self.store.as_ref())?;
+        report.scopes = Self::report_scopes(request, plan, &failures);
+        self.emit(events);
+        Ok(report)
+    }
+}
+
+#[uniffi::export]
+impl SyncRuntime {
+    pub fn preview(&self, request: SyncRequest) -> Result<SyncPlan, SyncError> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .clone();
+        self.refresh_remote(&mut state, &request.scopes)?;
+        let local = self.local_inventory(&state, &request.scopes)?;
+        self.build_plan(&state, &request.scopes, &local)
+    }
+
+    pub fn reconcile(&self, request: SyncRequest) -> Result<SyncReport, SyncError> {
+        let run_id = format!("{}-{}", self.client_id, now_millis());
+        let mut state = self.state.lock().expect("runtime state lock poisoned");
+        let recovered = state.active_run.take();
+        self.refresh_remote(&mut state, &request.scopes)?;
+        let local = self.local_inventory(&state, &request.scopes)?;
+        for resource in &local {
+            state.kinds.insert(resource.key.encoded(), resource.kind);
+        }
+        let plan = self.build_plan(&state, &request.scopes, &local)?;
+        if let Some(previous) = recovered {
+            self.emit(vec![EngineEvent {
+                run_id: run_id.clone(),
+                operation_id: previous.id,
+                stage: "recovery".into(),
+                resource: None,
+                detail_json: "{}".into(),
+            }]);
+        }
+        self.execute(&request, &mut state, &local, &plan, &run_id)
+    }
+
+    pub fn list_conflicts(&self, query: ConflictQuery) -> Vec<ConflictRecord> {
+        self.state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .conflicts
+            .values()
+            .filter(|conflict| {
+                query
+                    .scope_id
+                    .as_ref()
+                    .is_none_or(|scope| scope == &conflict.resource.scope_id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn history(&self, resource: ResourceKey) -> Vec<VersionRecord> {
+        let state = self.state.lock().expect("runtime state lock poisoned");
+        let mut history: Vec<_> = state
+            .resource_commits(&resource)
+            .into_iter()
+            .map(|commit| VersionRecord {
+                commit_id: commit.id.clone(),
+                parents: commit.parents.clone(),
+                timestamp: commit.timestamp,
+                author: commit.author.clone(),
+                deleted: matches!(commit.change, ResourceChange::Delete),
+            })
+            .collect();
+        history.sort_by_key(|record| record.timestamp);
+        history
+    }
+
+    pub fn resolve(&self, request: ResolveConflictRequest) -> Result<SyncReport, SyncError> {
+        let scope = {
+            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            let record = state
+                .conflicts
+                .get(&request.conflict_id)
+                .cloned()
+                .ok_or_else(|| SyncError::IoError {
+                    msg: "conflict no longer exists".into(),
+                })?;
+            let current_heads = state.heads(&record.resource);
+            if current_heads != record.remote_heads {
+                state.conflicts.remove(&request.conflict_id);
+                state.save(self.store.as_ref())?;
+                return Err(SyncError::ConflictNeedResolution);
+            }
+            let local =
+                self.local_inventory(&state, std::slice::from_ref(&record.resource.scope_id))?;
+            let current = local
+                .iter()
+                .find(|resource| resource.key == record.resource);
+            let current_state =
+                current.map_or(ReplicaState::Missing, |resource| resource.state.clone());
+            if current_state.version_token() != record.local.version_token()
+                || current_state.content_id() != record.local.content_id()
+            {
+                state.conflicts.remove(&request.conflict_id);
+                state.save(self.store.as_ref())?;
+                return Err(SyncError::ConflictNeedResolution);
+            }
+
+            for preserved in &request.preserved {
+                let data = match &preserved.source {
+                    VersionChoice::Local => {
+                        self.local
+                            .read_resources(vec![record.resource.clone()])?
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| SyncError::IoError {
+                                msg: "local conflict side disappeared".into(),
+                            })?
+                            .data
+                    }
+                    VersionChoice::Remote { commit_id } => {
+                        self.content_for_remote(&state, &record.resource, Some(commit_id))?
+                    }
+                    VersionChoice::Delete => {
+                        return Err(SyncError::IoError {
+                            msg: "a deletion cannot be preserved as a copy".into(),
+                        });
+                    }
+                };
+                let result = self
+                    .local
+                    .apply_mutations(vec![LocalMutation::CreateCopy {
+                        key: preserved.target.clone(),
+                        data,
+                    }])?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| SyncError::IoError {
+                        msg: "local replica returned no copy result".into(),
+                    })?;
+                if result.status != ApplyStatus::Applied {
+                    return Err(SyncError::IoError {
+                        msg: result
+                            .error
+                            .unwrap_or_else(|| "copy target already exists".into()),
+                    });
+                }
+            }
+
+            let key = record.resource.clone();
+            match &request.primary {
+                VersionChoice::Local => {
+                    let content = self
+                        .local
+                        .read_resources(vec![key.clone()])?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| SyncError::IoError {
+                            msg: "local conflict side disappeared".into(),
+                        })?;
+                    let commit = self.publish_bytes(
+                        &mut state,
+                        key.clone(),
+                        content.kind,
+                        content.data.clone(),
+                        current_heads,
+                    )?;
+                    let content_id = blake3::hash(&content.data).to_hex().to_string();
+                    Self::set_present_baseline(
+                        &mut state,
+                        key.clone(),
+                        content_id,
+                        content.version_token,
+                        vec![commit.id],
+                        request.conflict_id.clone(),
+                    );
+                }
+                VersionChoice::Delete => {
+                    if !matches!(
+                        current_state,
+                        ReplicaState::Missing | ReplicaState::Deleted { .. }
+                    ) {
+                        let result = self
+                            .local
+                            .apply_mutations(vec![LocalMutation::ApplyDelete {
+                                key: key.clone(),
+                                precondition: Self::precondition(&current_state),
+                            }])?
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| SyncError::IoError {
+                                msg: "local replica returned no delete result".into(),
+                            })?;
+                        if result.status != ApplyStatus::Applied {
+                            return Err(SyncError::IoError {
+                                msg: result
+                                    .error
+                                    .unwrap_or_else(|| "delete precondition failed".into()),
+                            });
+                        }
+                    }
+                    let commit = self.publish_delete(&mut state, key.clone(), current_heads)?;
+                    Self::set_deleted_baseline(
+                        &mut state,
+                        key.clone(),
+                        vec![commit.id],
+                        request.conflict_id.clone(),
+                    );
+                }
+                VersionChoice::Remote { commit_id } => {
+                    if !record.remote_heads.contains(commit_id) {
+                        return Err(SyncError::IoError {
+                            msg: "selected remote version is no longer a head".into(),
+                        });
+                    }
+                    let selected = state.commits.get(commit_id).cloned().ok_or_else(|| {
+                        SyncError::IoError {
+                            msg: "selected remote commit is unavailable".into(),
+                        }
+                    })?;
+                    match selected.change {
+                        ResourceChange::Delete => {
+                            if !matches!(
+                                current_state,
+                                ReplicaState::Missing | ReplicaState::Deleted { .. }
+                            ) {
+                                let result = self
+                                    .local
+                                    .apply_mutations(vec![LocalMutation::ApplyDelete {
+                                        key: key.clone(),
+                                        precondition: Self::precondition(&current_state),
+                                    }])?
+                                    .into_iter()
+                                    .next()
+                                    .ok_or_else(|| SyncError::IoError {
+                                        msg: "local replica returned no delete result".into(),
+                                    })?;
+                                if result.status != ApplyStatus::Applied {
+                                    return Err(SyncError::IoError {
+                                        msg: result
+                                            .error
+                                            .unwrap_or_else(|| "delete precondition failed".into()),
+                                    });
+                                }
+                            }
+                            let commit =
+                                self.publish_delete(&mut state, key.clone(), current_heads)?;
+                            Self::set_deleted_baseline(
+                                &mut state,
+                                key.clone(),
+                                vec![commit.id],
+                                request.conflict_id.clone(),
+                            );
+                        }
+                        change => {
+                            let data = self.content_for_remote(&state, &key, Some(commit_id))?;
+                            let kind = if matches!(change, ResourceChange::TextDelta { .. }) {
+                                ResourceKind::Text
+                            } else {
+                                ResourceKind::Binary
+                            };
+                            let result = self
+                                .local
+                                .apply_mutations(vec![LocalMutation::WritePresent {
+                                    key: key.clone(),
+                                    data: data.clone(),
+                                    precondition: Self::precondition(&current_state),
+                                }])?
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| SyncError::IoError {
+                                    msg: "local replica returned no write result".into(),
+                                })?;
+                            if result.status != ApplyStatus::Applied {
+                                return Err(SyncError::IoError {
+                                    msg: result
+                                        .error
+                                        .unwrap_or_else(|| "write precondition failed".into()),
+                                });
+                            }
+                            let commit = self.publish_bytes(
+                                &mut state,
+                                key.clone(),
+                                kind,
+                                data.clone(),
+                                current_heads,
+                            )?;
+                            Self::set_present_baseline(
+                                &mut state,
+                                key.clone(),
+                                blake3::hash(&data).to_hex().to_string(),
+                                result.version_token.unwrap_or_default(),
+                                vec![commit.id],
+                                request.conflict_id.clone(),
+                            );
+                        }
+                    }
+                }
+            }
+            state.conflicts.remove(&request.conflict_id);
+            state.save(self.store.as_ref())?;
+            record.resource.scope_id
+        };
+        self.reconcile(SyncRequest {
+            scopes: vec![scope],
+        })
+    }
+
+    pub fn rollback(&self, request: RollbackRequest) -> Result<SyncReport, SyncError> {
+        let scope = request.resource.scope_id.clone();
+        {
+            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            let selected = state
+                .commits
+                .get(&request.commit_id)
+                .cloned()
+                .filter(|commit| commit.resource == request.resource)
+                .ok_or_else(|| SyncError::IoError {
+                    msg: "rollback version is unavailable".into(),
+                })?;
+            let local = self.local_inventory(&state, std::slice::from_ref(&scope))?;
+            let current = local
+                .iter()
+                .find(|resource| resource.key == request.resource)
+                .map_or(ReplicaState::Missing, |resource| resource.state.clone());
+            let parents = state.heads(&request.resource);
+            match selected.change {
+                ResourceChange::Delete => {
+                    if !matches!(
+                        current,
+                        ReplicaState::Missing | ReplicaState::Deleted { .. }
+                    ) {
+                        let result = self
+                            .local
+                            .apply_mutations(vec![LocalMutation::ApplyDelete {
+                                key: request.resource.clone(),
+                                precondition: Self::precondition(&current),
+                            }])?
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| SyncError::IoError {
+                                msg: "local replica returned no rollback result".into(),
+                            })?;
+                        if result.status != ApplyStatus::Applied {
+                            return Err(SyncError::IoError {
+                                msg: "rollback delete precondition failed".into(),
+                            });
+                        }
+                    }
+                    let commit =
+                        self.publish_delete(&mut state, request.resource.clone(), parents)?;
+                    Self::set_deleted_baseline(
+                        &mut state,
+                        request.resource.clone(),
+                        vec![commit.id],
+                        "rollback".into(),
+                    );
+                }
+                change => {
+                    let data = self.content_for_remote(
+                        &state,
+                        &request.resource,
+                        Some(&request.commit_id),
+                    )?;
+                    let kind = if matches!(change, ResourceChange::TextDelta { .. }) {
+                        ResourceKind::Text
+                    } else {
+                        ResourceKind::Binary
+                    };
+                    let result = self
+                        .local
+                        .apply_mutations(vec![LocalMutation::WritePresent {
+                            key: request.resource.clone(),
+                            data: data.clone(),
+                            precondition: Self::precondition(&current),
+                        }])?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| SyncError::IoError {
+                            msg: "local replica returned no rollback result".into(),
+                        })?;
+                    if result.status != ApplyStatus::Applied {
+                        return Err(SyncError::IoError {
+                            msg: "rollback write precondition failed".into(),
+                        });
+                    }
+                    let commit = self.publish_bytes(
+                        &mut state,
+                        request.resource.clone(),
+                        kind,
+                        data.clone(),
+                        parents,
+                    )?;
+                    Self::set_present_baseline(
+                        &mut state,
+                        request.resource.clone(),
+                        blake3::hash(&data).to_hex().to_string(),
+                        result.version_token.unwrap_or_default(),
+                        vec![commit.id],
+                        "rollback".into(),
+                    );
+                }
+            }
+            state.save(self.store.as_ref())?;
+        }
+        self.reconcile(SyncRequest {
+            scopes: vec![scope],
+        })
+    }
+
+    pub fn maintain(&self, request: MaintenanceRequest) -> Result<V2MaintenanceReport, SyncError> {
+        let state = self.state.lock().expect("runtime state lock poisoned");
+        let scopes: HashSet<_> = request.scopes.into_iter().collect();
+        let keys = state.remote_keys(&scopes);
+        let mut report = V2MaintenanceReport {
+            resources: keys.len() as u64,
+            ..V2MaintenanceReport::default()
+        };
+        for key in keys {
+            let count = state.resource_commits(&key).len() as u64;
+            if count > request.history_retention_versions
+                || state.heads(&key).len() > 1
+                || state
+                    .conflicts
+                    .values()
+                    .any(|conflict| conflict.resource == key)
+            {
+                report.deferred += 1;
+            }
+        }
+        Ok(report)
+    }
+
+    pub fn retire_client(&self, client_id: String) -> Result<(), SyncError> {
+        let mut state = self.state.lock().expect("runtime state lock poisoned");
+        state.retired_clients.insert(client_id);
+        state.save(self.store.as_ref())
+    }
+
+    pub fn close(&self) -> Result<(), SyncError> {
+        self.store.close()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::{EngineEventListenerV2, LocalReplica};
+    use crate::{LocalFolderRemoteV2, RedbRuntimeStore};
+
+    #[derive(Default)]
+    struct MemoryReplica {
+        files: Mutex<BTreeMap<ResourceKey, (Vec<u8>, u64)>>,
+    }
+    impl LocalReplica for MemoryReplica {
+        fn list_resources(&self, scopes: Vec<String>) -> Result<Vec<LocalResource>, SyncError> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(key, _)| scopes.is_empty() || scopes.contains(&key.scope_id))
+                .map(|(key, (data, version))| LocalResource {
+                    key: key.clone(),
+                    kind: ResourceKind::Binary,
+                    state: ReplicaState::present(
+                        blake3::hash(data).to_hex().to_string(),
+                        data.len() as u64,
+                        version.to_string(),
+                    ),
+                })
+                .collect())
+        }
+        fn read_resources(
+            &self,
+            keys: Vec<ResourceKey>,
+        ) -> Result<Vec<ResourceContent>, SyncError> {
+            let files = self.files.lock().unwrap();
+            Ok(keys
+                .into_iter()
+                .filter_map(|key| {
+                    files.get(&key).map(|(data, version)| ResourceContent {
+                        key,
+                        kind: ResourceKind::Binary,
+                        version_token: version.to_string(),
+                        data: data.clone(),
+                    })
+                })
+                .collect())
+        }
+        fn apply_mutations(
+            &self,
+            mutations: Vec<LocalMutation>,
+        ) -> Result<Vec<LocalApplyResult>, SyncError> {
+            let mut files = self.files.lock().unwrap();
+            Ok(mutations
+                .into_iter()
+                .map(|mutation| {
+                    let key = match &mutation {
+                        LocalMutation::WritePresent { key, .. }
+                        | LocalMutation::ApplyDelete { key, .. }
+                        | LocalMutation::CreateCopy { key, .. } => key.clone(),
+                    };
+                    let matches = match &mutation {
+                        LocalMutation::WritePresent { precondition, .. }
+                        | LocalMutation::ApplyDelete { precondition, .. } => match precondition {
+                            MutationPrecondition::Missing => !files.contains_key(&key),
+                            MutationPrecondition::Version { version_token } => files
+                                .get(&key)
+                                .is_some_and(|(_, version)| version.to_string() == *version_token),
+                        },
+                        LocalMutation::CreateCopy { .. } => !files.contains_key(&key),
+                    };
+                    if !matches {
+                        return LocalApplyResult {
+                            key,
+                            status: ApplyStatus::PreconditionFailed,
+                            version_token: None,
+                            error: None,
+                        };
+                    }
+                    let version = files.get(&key).map_or(1, |(_, version)| version + 1);
+                    match mutation {
+                        LocalMutation::WritePresent { data, .. }
+                        | LocalMutation::CreateCopy { data, .. } => {
+                            files.insert(key.clone(), (data, version));
+                        }
+                        LocalMutation::ApplyDelete { .. } => {
+                            files.remove(&key);
+                        }
+                    }
+                    LocalApplyResult {
+                        key,
+                        status: ApplyStatus::Applied,
+                        version_token: Some(version.to_string()),
+                        error: None,
+                    }
+                })
+                .collect())
+        }
+    }
+    struct Events;
+    impl EngineEventListenerV2 for Events {
+        fn on_events(&self, _: Vec<EngineEvent>) {}
+    }
+
+    fn runtime(root: &std::path::Path, client: &str, local: Arc<MemoryReplica>) -> SyncRuntime {
+        SyncRuntime::with_backends(
+            client.into(),
+            Arc::new(RedbRuntimeStore::open(root.join(format!("{client}.redb"))).unwrap()),
+            Arc::new(LocalFolderRemoteV2::open(root.join("remote")).unwrap()),
+            local,
+            Arc::new(Events),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn two_replicas_upload_then_download() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = ResourceKey::new("scope", "a.bin");
+        let first = Arc::new(MemoryReplica::default());
+        first
+            .files
+            .lock()
+            .unwrap()
+            .insert(key.clone(), (b"hello".to_vec(), 1));
+        runtime(dir.path(), "a", first)
+            .reconcile(SyncRequest {
+                scopes: vec!["scope".into()],
+            })
+            .unwrap();
+        let second = Arc::new(MemoryReplica::default());
+        let report = runtime(dir.path(), "b", second.clone())
+            .reconcile(SyncRequest {
+                scopes: vec!["scope".into()],
+            })
+            .unwrap();
+        assert_eq!(report.downloaded, 1);
+        assert_eq!(second.files.lock().unwrap()[&key].0, b"hello");
+    }
+
+    #[test]
+    fn three_binary_heads_are_preserved_as_a_remote_fork() {
+        let key = ResourceKey::new("scope", "fork.bin");
+        let mut state = RuntimeState::default();
+        for (counter, author, byte) in [(1, "a", b'a'), (1, "b", b'b'), (1, "c", b'c')] {
+            let data = vec![byte];
+            let commit = Commit::create(
+                key.clone(),
+                Vec::new(),
+                author.into(),
+                counter,
+                ResourceChange::BinarySnapshot {
+                    content_id: blake3::hash(&data).to_hex().to_string(),
+                    size: 1,
+                    chunk_hashes: vec![blake3::hash(&data).to_hex().to_string()],
+                },
+            );
+            state.commits.insert(commit.id.clone(), commit);
+        }
+        assert!(
+            matches!(state.remote_state(&key).unwrap(), RemoteResourceState::Forked { heads } if heads.len() == 3)
+        );
+    }
+
+    #[test]
+    fn conflict_does_not_block_unrelated_resource_in_scope() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conflict_key = ResourceKey::new("scope", "conflict.bin");
+        let remote_local = Arc::new(MemoryReplica::default());
+        remote_local
+            .files
+            .lock()
+            .unwrap()
+            .insert(conflict_key.clone(), (b"remote".to_vec(), 1));
+        runtime(dir.path(), "a", remote_local)
+            .reconcile(SyncRequest {
+                scopes: vec!["scope".into()],
+            })
+            .unwrap();
+
+        let second = Arc::new(MemoryReplica::default());
+        second
+            .files
+            .lock()
+            .unwrap()
+            .insert(conflict_key, (b"local".to_vec(), 1));
+        second
+            .files
+            .lock()
+            .unwrap()
+            .insert(ResourceKey::new("scope", "new.bin"), (b"new".to_vec(), 1));
+        let report = runtime(dir.path(), "b", second)
+            .reconcile(SyncRequest {
+                scopes: vec!["scope".into()],
+            })
+            .unwrap();
+        assert_eq!(report.conflicts, 1);
+        assert_eq!(report.uploaded, 1);
+        assert_eq!(report.scopes[0].status, ScopeStatus::Partial);
+    }
+}

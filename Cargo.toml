@@ -1,6 +1,6 @@
 [package]
 name = "rollforward"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Decentralized file-sync engine for dumb remote storage (text CRDT + binary chunking, rollback, truncation)."
 readme = "README.md"
