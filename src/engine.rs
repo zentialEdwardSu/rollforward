@@ -30,8 +30,8 @@ use crate::remote::RemoteStorage;
 use crate::store::LocalStore;
 use crate::text::TextDoc;
 use crate::types::{
-    BinaryConflictPolicy, ChangeType, EngineNotificationListener, OpLogEntry, OplogCacheEntry,
-    SyncError,
+    BinaryConflictPolicy, BinaryFileState, ChangeType, EngineNotificationListener,
+    MaintenanceReport, OpLogEntry, OplogCacheEntry, SyncError,
 };
 
 /// Maximum CAS-retry attempts before giving up on a concurrent write.
@@ -45,6 +45,8 @@ enum FileState {
     Binary {
         /// Ordered chunk hashes making up the file.
         manifest: Vec<String>,
+        /// Whether the current head is a deletion tombstone.
+        deleted: bool,
     },
 }
 
@@ -70,6 +72,9 @@ enum PersistedState {
     Binary {
         /// Ordered chunk hashes.
         manifest: Vec<String>,
+        /// Added after the initial format; absent values mean present.
+        #[serde(default)]
+        deleted: bool,
         /// Highest integrated sequence.
         head: u64,
     },
@@ -285,7 +290,7 @@ impl SyncEngine {
     /// Resolve binary state by replaying manifests in sequence order, running a
     /// three-way merge at any forked sequence.
     fn build_binary(&self, entries: &[OpLogEntry]) -> Result<(TrackedFile, bool), SyncError> {
-        let mut current: Vec<String> = Vec::new();
+        let mut current: Option<Vec<String>> = None;
         let mut head = 0u64;
         let mut needs_copy = false;
 
@@ -301,39 +306,68 @@ impl SyncEngine {
             }
             head = head.max(seq);
 
-            let manifests: Vec<Vec<String>> = group
+            let states: Vec<Option<Vec<String>>> = group
                 .iter()
                 .filter_map(|e| match &e.change_type {
-                    ChangeType::BinarySnapshot { chunk_hashes } => Some(chunk_hashes.clone()),
+                    ChangeType::BinarySnapshot { chunk_hashes } => Some(Some(chunk_hashes.clone())),
+                    ChangeType::Delete => Some(None),
                     _ => None,
                 })
                 .collect();
 
-            match manifests.len() {
-                0 => {} // Delete or non-binary at this seq; ignore.
-                1 => current.clone_from(&manifests[0]),
+            match states.len() {
+                0 => {}
+                1 => current.clone_from(&states[0]),
                 _ => {
-                    // Fork: three-way merge the first two forked manifests
-                    // against the pre-fork state.
-                    let merged = binary::merge_manifests(
-                        &current,
-                        &manifests[0],
-                        &manifests[1],
-                        self.binary_policy,
-                    );
-                    current = match merged {
-                        BinaryMerge::Unchanged(m) | BinaryMerge::FastForward(m) => m,
-                        BinaryMerge::NeedsResolution => {
-                            return Err(SyncError::ConflictNeedResolution);
+                    let left = &states[0];
+                    let right = &states[1];
+                    if left == right {
+                        current.clone_from(left);
+                    } else if left.is_none() || right.is_none() {
+                        match self.binary_policy {
+                            BinaryConflictPolicy::Manual => {
+                                return Err(SyncError::ConflictNeedResolution);
+                            }
+                            BinaryConflictPolicy::KeepLocal | BinaryConflictPolicy::KeepBoth => {
+                                needs_copy |= self.binary_policy == BinaryConflictPolicy::KeepBoth;
+                                current.clone_from(left);
+                            }
+                            BinaryConflictPolicy::KeepRemote => current.clone_from(right),
                         }
-                        BinaryMerge::Conflict {
-                            resolved,
-                            needs_copy: nc,
-                        } => {
-                            needs_copy |= nc;
-                            resolved
+                    } else if left == &current {
+                        current.clone_from(right);
+                    } else if right == &current {
+                        current.clone_from(left);
+                    } else {
+                        match (left, right) {
+                            (Some(left), Some(right)) => {
+                                let base = current.as_deref().unwrap_or(&[]);
+                                current = Some(
+                                    match binary::merge_manifests(
+                                        base,
+                                        left,
+                                        right,
+                                        self.binary_policy,
+                                    ) {
+                                        BinaryMerge::Unchanged(m) | BinaryMerge::FastForward(m) => {
+                                            m
+                                        }
+                                        BinaryMerge::NeedsResolution => {
+                                            return Err(SyncError::ConflictNeedResolution);
+                                        }
+                                        BinaryMerge::Conflict {
+                                            resolved,
+                                            needs_copy: nc,
+                                        } => {
+                                            needs_copy |= nc;
+                                            resolved
+                                        }
+                                    },
+                                );
+                            }
+                            _ => unreachable!("mixed present/deleted fork handled above"),
                         }
-                    };
+                    }
                 }
             }
             i = j;
@@ -341,7 +375,10 @@ impl SyncEngine {
         Ok((
             TrackedFile {
                 head,
-                state: FileState::Binary { manifest: current },
+                state: FileState::Binary {
+                    manifest: current.clone().unwrap_or_default(),
+                    deleted: current.is_none(),
+                },
             },
             needs_copy,
         ))
@@ -359,8 +396,9 @@ impl SyncEngine {
                 full_update: doc.full_update(),
                 head: file.head,
             },
-            FileState::Binary { manifest } => PersistedState::Binary {
+            FileState::Binary { manifest, deleted } => PersistedState::Binary {
                 manifest: manifest.clone(),
+                deleted: *deleted,
                 head: file.head,
             },
         };
@@ -454,10 +492,7 @@ impl SyncEngine {
     /// `put_pack_index` are idempotent by id, so an upload interrupted after some
     /// packs are written completes safely on retry (already-written packs re-PUT
     /// as no-ops).
-    fn upload_packs(
-        &self,
-        chunks: &[(crate::types::ChunkInfo, Vec<u8>)],
-    ) -> Result<(), SyncError> {
+    fn upload_packs(&self, chunks: &[(crate::types::ChunkInfo, Vec<u8>)]) -> Result<(), SyncError> {
         let existing = self.load_pack_index()?;
         let new: Vec<(crate::types::ChunkInfo, Vec<u8>)> = chunks
             .iter()
@@ -495,7 +530,67 @@ impl SyncEngine {
         Ok(live)
     }
 
-    fn gc_packs(&self, live: &HashSet<String>) -> Result<(), SyncError> {
+    /// Truncate one file without running pack GC. Batch maintenance invokes
+    /// this for every file first, then computes liveness and collects once.
+    fn truncate_file_history(&self, file_id: &str, n: u64) -> Result<(bool, u64, bool), SyncError> {
+        let entries = self.load_entries(file_id)?;
+        let Some(latest) = entries.iter().map(|e| e.sequence).max() else {
+            return Ok((false, 0, false));
+        };
+        let watermark = self
+            .remote
+            .list_statuses()?
+            .iter()
+            .map(|status| status.last_synced_sequence)
+            .min()
+            .unwrap_or(latest);
+        let cut = latest.saturating_sub(n).min(watermark);
+        if cut == 0 {
+            return Ok((false, 0, true));
+        }
+
+        let is_text = entries
+            .iter()
+            .any(|entry| matches!(entry.change_type, ChangeType::TextDelta { .. }));
+        if is_text {
+            let existing = self.load_baseline(file_id)?;
+            let existing_seq = existing.as_ref().map_or(0, |(_, sequence)| *sequence);
+            let existing_bytes = existing.as_ref().map(|(bytes, _)| bytes.as_slice());
+            let deltas: Vec<Vec<u8>> = entries
+                .iter()
+                .filter(|entry| entry.sequence > existing_seq && entry.sequence <= cut)
+                .filter_map(|entry| match &entry.change_type {
+                    ChangeType::TextDelta { delta } => Some(delta.clone()),
+                    _ => None,
+                })
+                .collect();
+            let doc = TextDoc::from_baseline_and_deltas(existing_bytes, &deltas)?;
+            let compressed =
+                zstd::encode_all(doc.full_update().as_slice(), ZSTD_LEVEL).map_err(|error| {
+                    SyncError::IoError {
+                        msg: error.to_string(),
+                    }
+                })?;
+            self.remote
+                .put_baseline(file_id.to_owned(), cut, compressed)?;
+        }
+
+        let mut deleted = 0;
+        let mut items = self.remote.list_oplogs(file_id.to_owned())?;
+        oplog::sort_items(&mut items);
+        for item in items.iter().filter(|item| item.sequence <= cut) {
+            self.remote
+                .delete_oplog(file_id.to_owned(), item.remote_path.clone())?;
+            deleted += 1;
+        }
+        self.store.commit_truncation(file_id.to_owned(), cut)?;
+        Ok((true, deleted, false))
+    }
+
+    fn gc_packs(&self, live: &HashSet<String>) -> Result<(u64, u64, u64), SyncError> {
+        let mut deleted = 0;
+        let mut repacked = 0;
+        let mut reclaimed = 0;
         for index_id in self.remote.list_pack_indexes()? {
             let bytes = self.remote.get_pack_index(index_id.clone())?;
             let index: binary::PackIndex = serde_json::from_slice(&bytes)
@@ -503,15 +598,34 @@ impl SyncEngine {
             match binary::classify_pack(&index.chunks, live) {
                 binary::PackGc::Keep | binary::PackGc::KeepMixed => {}
                 binary::PackGc::Delete => {
+                    reclaimed += index
+                        .chunks
+                        .iter()
+                        .map(|chunk| u64::from(chunk.length))
+                        .sum::<u64>();
                     self.remote.delete_pack(index.pack_id)?;
                     self.remote.delete_pack_index(index_id)?;
+                    deleted += 1;
                 }
                 binary::PackGc::Repack { live: live_hashes } => {
+                    let total = index
+                        .chunks
+                        .iter()
+                        .map(|chunk| u64::from(chunk.length))
+                        .sum::<u64>();
+                    let live_bytes = index
+                        .chunks
+                        .iter()
+                        .filter(|chunk| live_hashes.contains(&chunk.hash))
+                        .map(|chunk| u64::from(chunk.length))
+                        .sum::<u64>();
+                    reclaimed += total.saturating_sub(live_bytes);
                     self.repack_live(&index, &live_hashes)?;
+                    repacked += 1;
                 }
             }
         }
-        Ok(())
+        Ok((deleted, repacked, reclaimed))
     }
 
     /// Rewrite the surviving chunks of `old` into a fresh pack, then delete the
@@ -570,7 +684,15 @@ impl SyncEngine {
         let manifest = {
             let files = self.files.read().expect("files lock poisoned");
             match files.get(&file_id).map(|f| &f.state) {
-                Some(FileState::Binary { manifest }) => manifest.clone(),
+                Some(FileState::Binary {
+                    manifest,
+                    deleted: false,
+                }) => manifest.clone(),
+                Some(FileState::Binary { deleted: true, .. }) => {
+                    return Err(SyncError::IoError {
+                        msg: format!("{file_id} is deleted"),
+                    });
+                }
                 _ => {
                     return Err(SyncError::IoError {
                         msg: format!("{file_id} is not a tracked binary file"),
@@ -580,10 +702,9 @@ impl SyncEngine {
         };
         let index = self.load_pack_index()?;
         binary::reassemble(&manifest, |hash| {
-            let (pack_id, offset, length) =
-                index.get(hash).ok_or_else(|| SyncError::IoError {
-                    msg: format!("chunk {hash} not found in any pack"),
-                })?;
+            let (pack_id, offset, length) = index.get(hash).ok_or_else(|| SyncError::IoError {
+                msg: format!("chunk {hash} not found in any pack"),
+            })?;
             let bytes = self
                 .remote
                 .get_pack_range(pack_id.clone(), *offset, *length)?;
@@ -650,6 +771,7 @@ impl SyncEngine {
             head: 0,
             state: FileState::Binary {
                 manifest: Vec::new(),
+                deleted: false,
             },
         });
         if !matches!(file.state, FileState::Binary { .. }) {
@@ -668,9 +790,54 @@ impl SyncEngine {
             },
         })?;
         let seq = entry.sequence;
-        file.state = FileState::Binary { manifest: man };
+        file.state = FileState::Binary {
+            manifest: man,
+            deleted: false,
+        };
         self.persist_file(&file_id, file, Some(&entry))?;
         self.remote.put_status(self.client_id.clone(), file.head)?;
+        drop(files);
+        self.listener.on_file_content_updated(file_id);
+        Ok(seq)
+    }
+
+    /// Publish a deletion tombstone for a binary file. Repeated deletion of an
+    /// already-deleted tracked file is idempotent and returns its current head.
+    pub fn delete_binary(&self, file_id: String) -> Result<u64, SyncError> {
+        let mut files = self.files.write().expect("files lock poisoned");
+        let file = files.entry(file_id.clone()).or_insert_with(|| TrackedFile {
+            head: 0,
+            state: FileState::Binary {
+                manifest: Vec::new(),
+                deleted: false,
+            },
+        });
+        let already_deleted = match &file.state {
+            FileState::Binary { deleted, .. } => *deleted,
+            FileState::Text(_) => {
+                return Err(SyncError::IoError {
+                    msg: format!("{file_id} is not a binary file"),
+                });
+            }
+        };
+        if already_deleted {
+            return Ok(file.head);
+        }
+
+        let client_id = self.client_id.clone();
+        let entry = self.publish_with_retry(&file_id, file, |seq| OpLogEntry {
+            sequence: seq,
+            client_id: client_id.clone(),
+            timestamp: now_millis(),
+            change_type: ChangeType::Delete,
+        })?;
+        file.state = FileState::Binary {
+            manifest: Vec::new(),
+            deleted: true,
+        };
+        self.persist_file(&file_id, file, Some(&entry))?;
+        self.remote.put_status(self.client_id.clone(), file.head)?;
+        let seq = entry.sequence;
         drop(files);
         self.listener.on_file_content_updated(file_id);
         Ok(seq)
@@ -757,16 +924,20 @@ impl SyncEngine {
                 },
             })?
         } else {
-            let manifest = match &file.state {
-                FileState::Binary { manifest } => manifest.clone(),
+            let binary_state = match &file.state {
+                FileState::Binary { manifest, deleted } => (manifest.clone(), *deleted),
                 FileState::Text(_) => return Ok(()),
             };
             self.publish_with_retry(file_id, file, |seq| OpLogEntry {
                 sequence: seq,
                 client_id: client_id.clone(),
                 timestamp: now_millis(),
-                change_type: ChangeType::BinarySnapshot {
-                    chunk_hashes: manifest.clone(),
+                change_type: if binary_state.1 {
+                    ChangeType::Delete
+                } else {
+                    ChangeType::BinarySnapshot {
+                        chunk_hashes: binary_state.0.clone(),
+                    }
                 },
             })?
         };
@@ -831,22 +1002,24 @@ impl SyncEngine {
             self.persist_file(&file_id, file, Some(&entry))?;
             entry.sequence
         } else {
-            // Binary: republish the manifest recorded at (or just before) k.
-            let manifest = entries
+            // Binary: republish the snapshot or deletion recorded at/before k.
+            let state_at_k = entries
                 .iter()
                 .filter(|e| e.sequence <= k)
                 .rev()
                 .find_map(|e| match &e.change_type {
-                    ChangeType::BinarySnapshot { chunk_hashes } => Some(chunk_hashes.clone()),
+                    ChangeType::BinarySnapshot { chunk_hashes } => Some(Some(chunk_hashes.clone())),
+                    ChangeType::Delete => Some(None),
                     _ => None,
                 })
                 .ok_or_else(|| SyncError::IoError {
-                    msg: format!("no binary snapshot at or before sequence {k}"),
+                    msg: format!("no binary state at or before sequence {k}"),
                 })?;
             let file = files.entry(file_id.clone()).or_insert_with(|| TrackedFile {
                 head: 0,
                 state: FileState::Binary {
                     manifest: Vec::new(),
+                    deleted: false,
                 },
             });
             self.integrate_remote(&file_id, file)?;
@@ -855,12 +1028,16 @@ impl SyncEngine {
                 sequence: s,
                 client_id: client_id.clone(),
                 timestamp: now_millis(),
-                change_type: ChangeType::BinarySnapshot {
-                    chunk_hashes: manifest.clone(),
+                change_type: match &state_at_k {
+                    Some(manifest) => ChangeType::BinarySnapshot {
+                        chunk_hashes: manifest.clone(),
+                    },
+                    None => ChangeType::Delete,
                 },
             })?;
             file.state = FileState::Binary {
-                manifest: manifest.clone(),
+                manifest: state_at_k.clone().unwrap_or_default(),
+                deleted: state_at_k.is_none(),
             };
             self.persist_file(&file_id, file, Some(&entry))?;
             entry.sequence
@@ -875,71 +1052,35 @@ impl SyncEngine {
     /// watermark across all clients. Uploads a compressed baseline, deletes
     /// superseded oplogs, and garbage-collects orphaned binary chunks.
     pub fn truncate(&self, file_id: String, n: u64) -> Result<(), SyncError> {
-        let entries = self.load_entries(&file_id)?;
-        let Some(latest) = entries.iter().map(|e| e.sequence).max() else {
-            return Ok(());
-        };
-        // Safe low watermark = min synced sequence across clients (default to
-        // latest if no status has been published).
-        let statuses = self.remote.list_statuses()?;
-        let watermark = statuses
-            .iter()
-            .map(|s| s.last_synced_sequence)
-            .min()
-            .unwrap_or(latest);
-        // Cut line: keep the newest `n`, but never past what all clients have seen.
-        let cut = latest.saturating_sub(n).min(watermark);
-        if cut == 0 {
-            return Ok(()); // Nothing safely truncatable yet.
-        }
-
-        let is_text = entries
-            .iter()
-            .any(|e| matches!(e.change_type, ChangeType::TextDelta { .. }));
-        if is_text {
-            // Merge 0..=cut into one full-update baseline and compress it.
-            let existing = self.load_baseline(&file_id)?;
-            let existing_seq = existing.as_ref().map_or(0, |(_, s)| *s);
-            let existing_bytes = existing.as_ref().map(|(b, _)| b.as_slice());
-            let deltas: Vec<Vec<u8>> = entries
-                .iter()
-                .filter(|e| e.sequence > existing_seq && e.sequence <= cut)
-                .filter_map(|e| match &e.change_type {
-                    ChangeType::TextDelta { delta } => Some(delta.clone()),
-                    _ => None,
-                })
-                .collect();
-            let doc = TextDoc::from_baseline_and_deltas(existing_bytes, &deltas)?;
-            let full = doc.full_update();
-            let compressed = zstd::encode_all(full.as_slice(), ZSTD_LEVEL)
-                .map_err(|e| SyncError::IoError { msg: e.to_string() })?;
-            self.remote.put_baseline(file_id.clone(), cut, compressed)?;
-        }
-
-        // Delete superseded oplogs (<= cut) from the remote and local cache.
-        let mut items = self.remote.list_oplogs(file_id.clone())?;
-        oplog::sort_items(&mut items);
-        for item in items.iter().filter(|i| i.sequence <= cut) {
-            self.remote
-                .delete_oplog(file_id.clone(), item.remote_path.clone())?;
-        }
-        self.store.commit_truncation(file_id.clone(), cut)?;
-
-        // Binary GC: reclaim space from packs no longer fully referenced.
-        // Per pack (classified by `binary::classify_pack`): fully-dead packs are
-        // deleted; packs past the dead-byte threshold are repacked (surviving
-        // chunks rewritten into a fresh pack, old one dropped); mostly-live packs
-        // are left for a later, deader pass. Chunks are content-addressed, so a
-        // live chunk duplicated across packs simply keeps each pack that holds it.
-        //
-        // The live set spans *every* file on the remote, not just the one being
-        // truncated: packs are a shared global namespace, so a pack holding
-        // another file's live chunks must never be reclaimed here.
-        if !is_text {
-            let live = self.global_live_chunks()?;
-            self.gc_packs(&live)?;
-        }
+        self.truncate_file_history(&file_id, n)?;
+        let live = self.global_live_chunks()?;
+        self.gc_packs(&live)?;
         Ok(())
+    }
+
+    /// Truncate a set of file histories, then run exactly one global pack GC.
+    pub fn truncate_many(
+        &self,
+        file_ids: Vec<String>,
+        n: u64,
+    ) -> Result<MaintenanceReport, SyncError> {
+        let unique: HashSet<String> = file_ids.into_iter().collect();
+        let mut report = MaintenanceReport {
+            files_considered: unique.len() as u64,
+            ..MaintenanceReport::default()
+        };
+        for file_id in unique {
+            let (truncated, deleted, deferred) = self.truncate_file_history(&file_id, n)?;
+            report.files_truncated += u64::from(truncated);
+            report.oplogs_deleted += deleted;
+            report.deferred_files += u64::from(deferred);
+        }
+        let live = self.global_live_chunks()?;
+        let (deleted, repacked, reclaimed) = self.gc_packs(&live)?;
+        report.packs_deleted = deleted;
+        report.packs_repacked = repacked;
+        report.bytes_reclaimed = reclaimed;
+        Ok(report)
     }
 
     /// Current text content of a tracked file, or an error if it is not a
@@ -958,7 +1099,34 @@ impl SyncEngine {
     pub fn get_manifest(&self, file_id: String) -> Result<Vec<String>, SyncError> {
         let files = self.files.read().expect("files lock poisoned");
         match files.get(&file_id).map(|f| &f.state) {
-            Some(FileState::Binary { manifest }) => Ok(manifest.clone()),
+            Some(FileState::Binary {
+                manifest,
+                deleted: false,
+            }) => Ok(manifest.clone()),
+            Some(FileState::Binary { deleted: true, .. }) => Err(SyncError::IoError {
+                msg: format!("{file_id} is deleted"),
+            }),
+            _ => Err(SyncError::IoError {
+                msg: format!("{file_id} is not a tracked binary file"),
+            }),
+        }
+    }
+
+    /// Current logical binary state, including deletion tombstones.
+    pub fn get_binary_state(&self, file_id: String) -> Result<BinaryFileState, SyncError> {
+        let files = self.files.read().expect("files lock poisoned");
+        match files.get(&file_id) {
+            Some(TrackedFile {
+                head,
+                state: FileState::Binary { manifest, deleted },
+            }) if *deleted => Ok(BinaryFileState::Deleted { head: *head }),
+            Some(TrackedFile {
+                head,
+                state: FileState::Binary { manifest, .. },
+            }) => Ok(BinaryFileState::Present {
+                manifest: manifest.clone(),
+                head: *head,
+            }),
             _ => Err(SyncError::IoError {
                 msg: format!("{file_id} is not a tracked binary file"),
             }),

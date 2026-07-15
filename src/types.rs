@@ -90,6 +90,27 @@ pub enum BinaryConflictPolicy {
     KeepBoth,
 }
 
+/// Current logical state of a tracked binary file.
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BinaryFileState {
+    /// The file exists and is described by this ordered chunk manifest.
+    Present { manifest: Vec<String>, head: u64 },
+    /// The latest binary operation is a deletion tombstone.
+    Deleted { head: u64 },
+}
+
+/// Aggregate result of a batch history-truncation and pack-GC pass.
+#[derive(uniffi::Record, Clone, Debug, Default, PartialEq, Eq)]
+pub struct MaintenanceReport {
+    pub files_considered: u64,
+    pub files_truncated: u64,
+    pub oplogs_deleted: u64,
+    pub deferred_files: u64,
+    pub packs_deleted: u64,
+    pub packs_repacked: u64,
+    pub bytes_reclaimed: u64,
+}
+
 /// Errors crossing the FFI boundary.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum SyncError {

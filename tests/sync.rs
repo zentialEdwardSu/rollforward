@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rollforward::types::{
-    BinaryConflictPolicy, ChangeType, ChunkInfo, ClientStatus, EngineNotificationListener,
-    OpLogEntry, OplogCacheEntry, RemoteLogItem,
+    BinaryConflictPolicy, BinaryFileState, ChangeType, ChunkInfo, ClientStatus,
+    EngineNotificationListener, OpLogEntry, OplogCacheEntry, RemoteLogItem,
 };
 use rollforward::{LocalFolderRemote, LocalStore, RedbStore, RemoteStorage, SyncEngine, SyncError};
 use tempfile::TempDir;
@@ -337,7 +337,12 @@ impl RemoteStorage for FaultRemote {
     fn put_pack(&self, pack_id: String, data: Vec<u8>) -> Result<(), SyncError> {
         self.inner.put_pack(pack_id, data)
     }
-    fn get_pack_range(&self, pack_id: String, offset: u64, length: u32) -> Result<Vec<u8>, SyncError> {
+    fn get_pack_range(
+        &self,
+        pack_id: String,
+        offset: u64,
+        length: u32,
+    ) -> Result<Vec<u8>, SyncError> {
         self.inner.get_pack_range(pack_id, offset, length)
     }
     fn list_packs(&self) -> Result<Vec<String>, SyncError> {
@@ -425,7 +430,12 @@ impl RemoteStorage for CountingRemote {
     fn put_pack(&self, pack_id: String, data: Vec<u8>) -> Result<(), SyncError> {
         self.inner.put_pack(pack_id, data)
     }
-    fn get_pack_range(&self, pack_id: String, offset: u64, length: u32) -> Result<Vec<u8>, SyncError> {
+    fn get_pack_range(
+        &self,
+        pack_id: String,
+        offset: u64,
+        length: u32,
+    ) -> Result<Vec<u8>, SyncError> {
         self.inner.get_pack_range(pack_id, offset, length)
     }
     fn list_packs(&self) -> Result<Vec<String>, SyncError> {
@@ -1370,7 +1380,11 @@ fn tru605_mostly_dead_pack_is_repacked() {
     for h in &manifest {
         assert!(stored.contains(h), "live chunk {h} resolvable after repack");
     }
-    assert_eq!(a.read_binary("blob".into()).unwrap(), v2, "local read intact");
+    assert_eq!(
+        a.read_binary("blob".into()).unwrap(),
+        v2,
+        "local read intact"
+    );
 
     let dbs_b = TempDir::new().unwrap();
     let (b, _) = engine("clientB", &dbs_b, remote.clone());
@@ -1409,7 +1423,10 @@ fn tru606_gc_spares_other_files_packs() {
     // "keep" is fully intact: every manifest chunk resolvable and bytes identical.
     let stored = stored_chunks(&remote);
     for h in &a.get_manifest("keep".into()).unwrap() {
-        assert!(stored.contains(h), "keep's live chunk {h} survives churn GC");
+        assert!(
+            stored.contains(h),
+            "keep's live chunk {h} survives churn GC"
+        );
     }
     assert_eq!(
         a.read_binary("keep".into()).unwrap(),
@@ -1641,11 +1658,7 @@ fn err704_auth_expired_surfaces_and_unlocks() {
 // ======================================================================
 
 /// Build an engine over a shared `CountingRemote`, returning the counter too.
-fn counting_engine(
-    client: &str,
-    dir: &TempDir,
-    remote: Arc<CountingRemote>,
-) -> Arc<SyncEngine> {
+fn counting_engine(client: &str, dir: &TempDir, remote: Arc<CountingRemote>) -> Arc<SyncEngine> {
     let rec = Arc::new(Recorder::default());
     let db = dir.path().join(format!("{client}.redb"));
     let store = Arc::new(RedbStore::open(db).unwrap());
@@ -1672,7 +1685,8 @@ fn b1_801_resync_without_new_entries_fetches_nothing() {
         let dbs = TempDir::new().unwrap();
         let (seed, _) = engine("seed", &dbs, plain);
         for i in 1..=10 {
-            seed.modify_text("doc".into(), format!("state-{i}")).unwrap();
+            seed.modify_text("doc".into(), format!("state-{i}"))
+                .unwrap();
         }
     }
 
@@ -1715,11 +1729,7 @@ fn b1_802_incremental_fetch_only_new_entries() {
     // Writer appends one more entry; reader should fetch exactly one.
     writer.modify_text("doc".into(), "v6".into()).unwrap();
     b.sync("doc".into()).unwrap();
-    assert_eq!(
-        counting.take_gets(),
-        1,
-        "only the one new entry is fetched"
-    );
+    assert_eq!(counting.take_gets(), 1, "only the one new entry is fetched");
 }
 
 /// B1-803: a fork injected at an already-cached sequence is still detected and
@@ -1751,7 +1761,10 @@ fn b1_803_fork_at_cached_sequence_still_detected() {
     let max_seq = items.iter().map(|i| i.sequence).max().unwrap();
     let tip_count = items.iter().filter(|i| i.sequence == max_seq).count();
     assert_eq!(tip_count, 1, "fork reconverged to a single unifying tip");
-    assert!(max_seq >= 2, "a unifying entry was published above the fork");
+    assert!(
+        max_seq >= 2,
+        "a unifying entry was published above the fork"
+    );
 }
 
 /// B1-804: cache rows left stale by another client's remote truncation are
@@ -1784,4 +1797,103 @@ fn b1_804_stale_cache_after_remote_truncation_is_inert() {
         text,
         "current content rebuilt despite stale cache rows below the cut"
     );
+}
+
+#[test]
+fn binary_delete_propagates_and_recreation_restores_presence() {
+    let (_remote_dir, remote) = shared_remote();
+    let dbs = TempDir::new().unwrap();
+    let (a, _) = engine("clientA", &dbs, remote.clone());
+    let (b, _) = engine("clientB", &dbs, remote);
+    let original = pseudo_bytes(90_000, 901);
+
+    a.modify_binary("attachment".into(), original).unwrap();
+    b.sync("attachment".into()).unwrap();
+    a.delete_binary("attachment".into()).unwrap();
+    b.sync("attachment".into()).unwrap();
+    assert!(matches!(
+        b.get_binary_state("attachment".into()).unwrap(),
+        BinaryFileState::Deleted { .. }
+    ));
+
+    let restored = pseudo_bytes(75_000, 902);
+    a.modify_binary("attachment".into(), restored.clone())
+        .unwrap();
+    b.sync("attachment".into()).unwrap();
+    assert!(matches!(
+        b.get_binary_state("attachment".into()).unwrap(),
+        BinaryFileState::Present { .. }
+    ));
+    assert_eq!(b.read_binary("attachment".into()).unwrap(), restored);
+}
+
+#[test]
+fn binary_rollback_crosses_delete_tombstone() {
+    let (_remote_dir, remote) = shared_remote();
+    let dbs = TempDir::new().unwrap();
+    let (a, _) = engine("clientA", &dbs, remote);
+    let bytes = pseudo_bytes(70_000, 903);
+
+    let present = a.modify_binary("attachment".into(), bytes.clone()).unwrap();
+    let deleted = a.delete_binary("attachment".into()).unwrap();
+    a.rollback("attachment".into(), present).unwrap();
+    assert_eq!(a.read_binary("attachment".into()).unwrap(), bytes);
+    a.rollback("attachment".into(), deleted).unwrap();
+    assert!(matches!(
+        a.get_binary_state("attachment".into()).unwrap(),
+        BinaryFileState::Deleted { .. }
+    ));
+}
+
+#[test]
+fn manual_snapshot_delete_fork_requires_resolution() {
+    let (_remote_dir, remote) = shared_remote();
+    let dbs = TempDir::new().unwrap();
+    let (a, _) = engine_with_policy(
+        "clientA",
+        &dbs,
+        remote.clone(),
+        BinaryConflictPolicy::Manual,
+    );
+    a.modify_binary("attachment".into(), pseudo_bytes(70_000, 904))
+        .unwrap();
+    inject_fork_entry(
+        &remote,
+        "attachment",
+        &OpLogEntry {
+            sequence: 1,
+            client_id: "clientB".into(),
+            timestamp: 0,
+            change_type: ChangeType::Delete,
+        },
+    );
+    assert!(matches!(
+        a.sync("attachment".into()),
+        Err(SyncError::ConflictNeedResolution)
+    ));
+}
+
+#[test]
+fn truncate_many_reports_all_files_and_runs_global_gc() {
+    let (_remote_dir, remote) = shared_remote();
+    let dbs = TempDir::new().unwrap();
+    let (a, _) = engine("clientA", &dbs, remote.clone());
+    for version in 0..4 {
+        a.modify_binary("one".into(), pseudo_bytes(90_000, 910 + version))
+            .unwrap();
+        a.modify_binary("two".into(), pseudo_bytes(90_000, 920 + version))
+            .unwrap();
+    }
+    let report = a
+        .truncate_many(vec!["one".into(), "two".into(), "one".into()], 1)
+        .unwrap();
+    assert_eq!(report.files_considered, 2);
+    assert_eq!(report.files_truncated, 2);
+    assert!(report.oplogs_deleted >= 6);
+
+    let (b, _) = engine("clientB", &dbs, remote);
+    b.sync("one".into()).unwrap();
+    b.sync("two".into()).unwrap();
+    assert!(b.read_binary("one".into()).is_ok());
+    assert!(b.read_binary("two".into()).is_ok());
 }
