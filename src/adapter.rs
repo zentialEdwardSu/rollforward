@@ -9,6 +9,37 @@ use crate::v2_types::{
     RangeData, ResourceAck, ResourceContent, ResourceKey,
 };
 
+/// Result returned by a host-provided structured text merger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextMergeResult {
+    /// The resource is not handled; use rollforward's ordinary text CRDT.
+    NotHandled,
+    /// Publish this validated, merged document.
+    Merged(Vec<u8>),
+    /// Keep both sides pending as an explicit synchronization conflict.
+    Conflict(String),
+}
+
+/// Optional host hook for syntax-aware, three-way text merging.
+///
+/// The engine invokes this only when both local and remote changed from an
+/// acknowledged text baseline. Implementations must be deterministic.
+pub trait TextMergePolicy: Send + Sync {
+    /// Order resources within a scope before applying planned operations.
+    /// Lower values run first; the default preserves resource-key ordering.
+    fn resource_priority(&self, _key: &ResourceKey) -> i32 {
+        0
+    }
+
+    fn merge_text(
+        &self,
+        key: &ResourceKey,
+        base: &[u8],
+        local: &[u8],
+        remote: &[u8],
+    ) -> Result<TextMergeResult, SyncError>;
+}
+
 #[uniffi::export(with_foreign)]
 pub trait LocalReplica: Send + Sync {
     fn list_resources(&self, scopes: Vec<String>) -> Result<Vec<LocalResource>, SyncError>;

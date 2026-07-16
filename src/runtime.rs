@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::{EngineEventListenerV2, LocalReplica, RemoteStorageV2};
+use crate::adapter::{
+    EngineEventListenerV2, LocalReplica, RemoteStorageV2, TextMergePolicy, TextMergeResult,
+};
 use crate::binary;
 use crate::core::plan_inventory;
 use crate::text::TextDoc;
@@ -242,6 +244,7 @@ pub struct SyncRuntime {
     remote: Arc<dyn RemoteStorageV2>,
     store: Arc<dyn RuntimeStore>,
     listener: Arc<dyn EngineEventListenerV2>,
+    text_merge_policy: Option<Arc<dyn TextMergePolicy>>,
     state: Mutex<RuntimeState>,
 }
 
@@ -260,8 +263,23 @@ impl SyncRuntime {
             remote,
             store,
             listener,
+            text_merge_policy: None,
             state: Mutex::new(state),
         })
+    }
+
+    /// Construct a runtime with a host-provided syntax-aware text merger.
+    pub fn with_text_merge_policy(
+        client_id: String,
+        store: Arc<dyn RuntimeStore>,
+        remote: Arc<dyn RemoteStorageV2>,
+        local: Arc<dyn LocalReplica>,
+        listener: Arc<dyn EngineEventListenerV2>,
+        text_merge_policy: Arc<dyn TextMergePolicy>,
+    ) -> Result<Self, SyncError> {
+        let mut runtime = Self::with_backends(client_id, store, remote, local, listener)?;
+        runtime.text_merge_policy = Some(text_merge_policy);
+        Ok(runtime)
     }
 
     fn emit(&self, events: Vec<EngineEvent>) {
@@ -473,6 +491,19 @@ impl SyncRuntime {
                     };
                 }
             }
+        }
+        if let Some(policy) = self.text_merge_policy.as_ref() {
+            plan.operations.sort_by(|left, right| {
+                left.key()
+                    .scope_id
+                    .cmp(&right.key().scope_id)
+                    .then_with(|| {
+                        policy
+                            .resource_priority(left.key())
+                            .cmp(&policy.resource_priority(right.key()))
+                    })
+                    .then_with(|| left.key().resource_id.cmp(&right.key().resource_id))
+            });
         }
         Ok(plan)
     }
@@ -829,6 +860,7 @@ impl SyncRuntime {
         let mut all_chunks = Vec::new();
         let mut manifests = HashMap::new();
         let mut failed_upload_keys = HashSet::new();
+        let mut merged_texts = HashMap::<ResourceKey, Vec<u8>>::new();
         for operation in &uploads {
             if let PlanOperation::Upload { key, local } = operation {
                 let Some(content) = contents.get(key) else {
@@ -852,6 +884,52 @@ impl SyncRuntime {
                     *failures.entry(key.scope_id.clone()).or_default() += 1;
                     report.failures += 1;
                     continue;
+                }
+                if content.kind == ResourceKind::Text
+                    && let Some(policy) = self.text_merge_policy.as_ref()
+                    && let Some(StoredBaseline {
+                        state: BaselineState::Present { remote_heads, .. },
+                        ..
+                    }) = state.baselines.get(&key.encoded())
+                    && *remote_heads != state.heads(key)
+                    && let Some(full) = state.text_states.get(&key.encoded())
+                {
+                    let base = TextDoc::from_baseline_and_deltas(Some(full), &[])?
+                        .content()
+                        .into_bytes();
+                    let remote = state.text_doc(key)?.content().into_bytes();
+                    match policy.merge_text(key, &base, &content.data, &remote)? {
+                        TextMergeResult::NotHandled => {}
+                        TextMergeResult::Merged(data) => {
+                            std::str::from_utf8(&data).map_err(serde_error)?;
+                            merged_texts.insert(key.clone(), data);
+                        }
+                        TextMergeResult::Conflict(reason) => {
+                            failed_upload_keys.insert(key.clone());
+                            let remote_state = state.remote_state(key)?;
+                            let record = ConflictRecord::new(
+                                key.clone(),
+                                ConflictKind::ContentVsContent,
+                                local,
+                                &remote_state,
+                            );
+                            state.conflicts.insert(record.id.clone(), record.clone());
+                            report.conflicts += 1;
+                            events.push(EngineEvent {
+                                run_id: run_id.into(),
+                                operation_id: record.id,
+                                stage: "conflict".into(),
+                                resource: Some(key.clone()),
+                                detail_json: serde_json::json!({
+                                    "kind": "ContentVsContent",
+                                    "reason": reason,
+                                    "structured_text": true,
+                                })
+                                .to_string(),
+                            });
+                            continue;
+                        }
+                    }
                 }
                 if content.kind == ResourceKind::Binary {
                     let chunks = binary::chunk_data(&content.data);
@@ -933,15 +1011,20 @@ impl SyncRuntime {
                             chunk_hashes: manifests.remove(&key).unwrap_or_default(),
                         },
                         ResourceKind::Text => {
-                            let mut doc = state
-                                .baselines
-                                .get(&key.encoded())
-                                .and_then(|_| state.text_states.get(&key.encoded()))
-                                .map_or_else(
-                                    || Ok(TextDoc::new()),
-                                    |full| TextDoc::from_baseline_and_deltas(Some(full), &[]),
-                                )?;
-                            let text = std::str::from_utf8(&content.data).map_err(serde_error)?;
+                            let mut doc = if merged_texts.contains_key(&key) {
+                                state.text_doc(&key)?
+                            } else {
+                                state
+                                    .baselines
+                                    .get(&key.encoded())
+                                    .and_then(|_| state.text_states.get(&key.encoded()))
+                                    .map_or_else(
+                                        || Ok(TextDoc::new()),
+                                        |full| TextDoc::from_baseline_and_deltas(Some(full), &[]),
+                                    )?
+                            };
+                            let data = merged_texts.get(&key).unwrap_or(&content.data);
+                            let text = std::str::from_utf8(data).map_err(serde_error)?;
                             ResourceChange::TextDelta {
                                 delta: doc.set_text(text),
                             }
@@ -1043,6 +1126,12 @@ impl SyncRuntime {
                     remote_heads,
                     ..
                 } => {
+                    if state.kinds.get(&key.encoded()) == Some(&ResourceKind::Text) {
+                        let document = state.text_doc(&key)?;
+                        state
+                            .text_states
+                            .insert(key.encoded(), document.full_update());
+                    }
                     Self::set_present_baseline(
                         state,
                         key,
@@ -1113,6 +1202,19 @@ impl SyncRuntime {
                                 .unwrap_or_else(|| "local precondition failed".into()),
                         })
                     } else {
+                        if selected
+                            .as_ref()
+                            .and_then(|head| state.commits.get(head))
+                            .is_some_and(|commit| {
+                                matches!(commit.change, ResourceChange::TextDelta { .. })
+                            })
+                        {
+                            let document = state.text_doc(&key)?;
+                            state
+                                .text_states
+                                .insert(key.encoded(), document.full_update());
+                            state.kinds.insert(key.encoded(), ResourceKind::Text);
+                        }
                         Self::set_present_baseline(
                             state,
                             key,

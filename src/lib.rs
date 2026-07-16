@@ -49,7 +49,10 @@ pub mod v2_types;
 
 use std::sync::Arc;
 
-pub use adapter::{EngineEventListenerV2, LocalReplica, NoopEventListenerV2, RemoteStorageV2};
+pub use adapter::{
+    EngineEventListenerV2, LocalReplica, NoopEventListenerV2, RemoteStorageV2, TextMergePolicy,
+    TextMergeResult,
+};
 pub use runtime::SyncRuntime;
 pub use types::SyncError;
 pub use v2_remote::LocalFolderRemoteV2;
