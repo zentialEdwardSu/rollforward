@@ -288,6 +288,14 @@ impl SyncRuntime {
         }
     }
 
+    /// Publish one event immediately while retaining it in the run journal
+    /// returned by `execute`. Long-running adapters can therefore surface
+    /// progress before the whole reconciliation finishes.
+    fn emit_progress(&self, events: &mut Vec<EngineEvent>, event: EngineEvent) {
+        self.emit(vec![event.clone()]);
+        events.push(event);
+    }
+
     fn refresh_remote(&self, state: &mut RuntimeState, scopes: &[String]) -> Result<(), SyncError> {
         let delta = self.remote.scan_catalog(CatalogScanRequest {
             scopes: scopes.to_vec(),
@@ -752,18 +760,22 @@ impl SyncRuntime {
             ..SyncReport::default()
         };
         let mut failures = HashMap::<String, u64>::new();
-        let mut events = vec![EngineEvent {
-            run_id: run_id.into(),
-            operation_id: run_id.into(),
-            stage: "run.start".into(),
-            resource: None,
-            detail_json: serde_json::json!({
-                "scopes": request.scopes.len(),
-                "local_resources": local.len(),
-                "operations": plan.operations.len(),
-            })
-            .to_string(),
-        }];
+        let mut events = Vec::new();
+        self.emit_progress(
+            &mut events,
+            EngineEvent {
+                run_id: run_id.into(),
+                operation_id: run_id.into(),
+                stage: "run.start".into(),
+                resource: None,
+                detail_json: serde_json::json!({
+                    "scopes": request.scopes.len(),
+                    "local_resources": local.len(),
+                    "operations": plan.operations.len(),
+                })
+                .to_string(),
+            },
+        );
 
         state
             .conflicts
@@ -780,41 +792,53 @@ impl SyncRuntime {
                 PlanOperation::ApplyDelete { .. } => "apply_delete",
                 PlanOperation::Conflict { .. } => "conflict",
             };
-            events.push(EngineEvent {
-                run_id: run_id.into(),
-                operation_id: operation_id.clone(),
-                stage: "resource.scan".into(),
-                resource: Some(operation.key().clone()),
-                detail_json: "{}".into(),
-            });
-            events.push(EngineEvent {
-                run_id: run_id.into(),
-                operation_id: operation_id.clone(),
-                stage: "resource.compare".into(),
-                resource: Some(operation.key().clone()),
-                detail_json: serde_json::json!({"decision": decision}).to_string(),
-            });
-            events.push(EngineEvent {
-                run_id: run_id.into(),
-                operation_id,
-                stage: "resource.decision".into(),
-                resource: Some(operation.key().clone()),
-                detail_json: serde_json::json!({"decision": decision}).to_string(),
-            });
+            self.emit_progress(
+                &mut events,
+                EngineEvent {
+                    run_id: run_id.into(),
+                    operation_id: operation_id.clone(),
+                    stage: "resource.scan".into(),
+                    resource: Some(operation.key().clone()),
+                    detail_json: "{}".into(),
+                },
+            );
+            self.emit_progress(
+                &mut events,
+                EngineEvent {
+                    run_id: run_id.into(),
+                    operation_id: operation_id.clone(),
+                    stage: "resource.compare".into(),
+                    resource: Some(operation.key().clone()),
+                    detail_json: serde_json::json!({"decision": decision}).to_string(),
+                },
+            );
+            self.emit_progress(
+                &mut events,
+                EngineEvent {
+                    run_id: run_id.into(),
+                    operation_id,
+                    stage: "resource.decision".into(),
+                    resource: Some(operation.key().clone()),
+                    detail_json: serde_json::json!({"decision": decision}).to_string(),
+                },
+            );
             if let PlanOperation::Conflict { record } = operation {
                 state.conflicts.insert(record.id.clone(), record.clone());
                 report.conflicts += 1;
-                events.push(EngineEvent {
-                    run_id: run_id.into(),
-                    operation_id: record.id.clone(),
-                    stage: "conflict".into(),
-                    resource: Some(record.resource.clone()),
-                    detail_json: serde_json::json!({
-                        "kind": format!("{:?}", record.kind),
-                        "remote_heads": record.remote_heads.len(),
-                    })
-                    .to_string(),
-                });
+                self.emit_progress(
+                    &mut events,
+                    EngineEvent {
+                        run_id: run_id.into(),
+                        operation_id: record.id.clone(),
+                        stage: "conflict".into(),
+                        resource: Some(record.resource.clone()),
+                        detail_json: serde_json::json!({
+                            "kind": format!("{:?}", record.kind),
+                            "remote_heads": record.remote_heads.len(),
+                        })
+                        .to_string(),
+                    },
+                );
             }
         }
 
@@ -851,6 +875,18 @@ impl SyncRuntime {
                 _ => None,
             })
             .collect();
+        if !uploads.is_empty() {
+            self.emit_progress(
+                &mut events,
+                EngineEvent {
+                    run_id: run_id.into(),
+                    operation_id: format!("{run_id}:upload"),
+                    stage: "upload.prepare".into(),
+                    resource: None,
+                    detail_json: serde_json::json!({"resources": uploads.len()}).to_string(),
+                },
+            );
+        }
         let contents: HashMap<_, _> = self
             .local
             .read_resources(upload_keys)?
@@ -867,16 +903,19 @@ impl SyncRuntime {
                     failed_upload_keys.insert(key.clone());
                     *failures.entry(key.scope_id.clone()).or_default() += 1;
                     report.failures += 1;
-                    events.push(EngineEvent {
-                        run_id: run_id.into(),
-                        operation_id: format!("{run_id}:read"),
-                        stage: "error".into(),
-                        resource: Some(key.clone()),
-                        detail_json: serde_json::json!({
-                            "error": "local replica did not return requested content"
-                        })
-                        .to_string(),
-                    });
+                    self.emit_progress(
+                        &mut events,
+                        EngineEvent {
+                            run_id: run_id.into(),
+                            operation_id: format!("{run_id}:read"),
+                            stage: "error".into(),
+                            resource: Some(key.clone()),
+                            detail_json: serde_json::json!({
+                                "error": "local replica did not return requested content"
+                            })
+                            .to_string(),
+                        },
+                    );
                     continue;
                 };
                 if local.version_token() != Some(content.version_token.as_str()) {
@@ -915,18 +954,21 @@ impl SyncRuntime {
                             );
                             state.conflicts.insert(record.id.clone(), record.clone());
                             report.conflicts += 1;
-                            events.push(EngineEvent {
-                                run_id: run_id.into(),
-                                operation_id: record.id,
-                                stage: "conflict".into(),
-                                resource: Some(key.clone()),
-                                detail_json: serde_json::json!({
-                                    "kind": "ContentVsContent",
-                                    "reason": reason,
-                                    "structured_text": true,
-                                })
-                                .to_string(),
-                            });
+                            self.emit_progress(
+                                &mut events,
+                                EngineEvent {
+                                    run_id: run_id.into(),
+                                    operation_id: record.id,
+                                    stage: "conflict".into(),
+                                    resource: Some(key.clone()),
+                                    detail_json: serde_json::json!({
+                                        "kind": "ContentVsContent",
+                                        "reason": reason,
+                                        "structured_text": true,
+                                    })
+                                    .to_string(),
+                                },
+                            );
                             continue;
                         }
                     }
@@ -961,7 +1003,7 @@ impl SyncRuntime {
             .collect();
         let built_packs = binary::build_packs(&new_chunks);
         if !uploads.is_empty() {
-            events.push(EngineEvent {
+            self.emit_progress(&mut events, EngineEvent {
                 run_id: run_id.into(),
                 operation_id: format!("{run_id}:upload"),
                 stage: "upload.plan".into(),
@@ -1044,20 +1086,38 @@ impl SyncRuntime {
             batch.commits.push(commit);
         }
         if !batch.commits.is_empty() || !batch.packs.is_empty() {
+            self.emit_progress(
+                &mut events,
+                EngineEvent {
+                    run_id: run_id.into(),
+                    operation_id: format!("{run_id}:upload"),
+                    stage: "upload.transfer".into(),
+                    resource: None,
+                    detail_json: serde_json::json!({
+                        "commits": batch.commits.len(),
+                        "packs": batch.packs.len(),
+                        "bytes": batch.packs.iter().map(|pack| pack.data.len() as u64).sum::<u64>(),
+                    })
+                    .to_string(),
+                },
+            );
             self.remote.commit_batch(batch)?;
             for (key, commit) in committed_local {
                 state.commits.insert(commit.id.clone(), commit.clone());
-                events.push(EngineEvent {
-                    run_id: run_id.into(),
-                    operation_id: commit.id.clone(),
-                    stage: "commit.catalog".into(),
-                    resource: Some(key.clone()),
-                    detail_json: serde_json::json!({
-                        "commit": &commit.id,
-                        "parents": commit.parents.len(),
-                    })
-                    .to_string(),
-                });
+                self.emit_progress(
+                    &mut events,
+                    EngineEvent {
+                        run_id: run_id.into(),
+                        operation_id: commit.id.clone(),
+                        stage: "commit.catalog".into(),
+                        resource: Some(key.clone()),
+                        detail_json: serde_json::json!({
+                            "commit": &commit.id,
+                            "parents": commit.parents.len(),
+                        })
+                        .to_string(),
+                    },
+                );
                 let heads = state.heads(&key);
                 match &commit.change {
                     ResourceChange::Delete => {
@@ -1162,7 +1222,7 @@ impl SyncRuntime {
                             entry.0 += 1;
                             entry.1 += u64::from(location.length);
                         }
-                        events.push(EngineEvent {
+                        self.emit_progress(&mut events, EngineEvent {
                             run_id: run_id.into(),
                             operation_id: format!("{run_id}:download"),
                             stage: "download.plan".into(),
@@ -1224,13 +1284,16 @@ impl SyncRuntime {
                             run_id.into(),
                         );
                         report.downloaded += 1;
-                        events.push(EngineEvent {
-                            run_id: run_id.into(),
-                            operation_id: format!("{run_id}:download"),
-                            stage: "download.write".into(),
-                            resource: Some(operation.key().clone()),
-                            detail_json: serde_json::json!({"bytes": bytes.len()}).to_string(),
-                        });
+                        self.emit_progress(
+                            &mut events,
+                            EngineEvent {
+                                run_id: run_id.into(),
+                                operation_id: format!("{run_id}:download"),
+                                stage: "download.write".into(),
+                                resource: Some(operation.key().clone()),
+                                detail_json: serde_json::json!({"bytes": bytes.len()}).to_string(),
+                            },
+                        );
                         Ok(())
                     }
                 }
@@ -1259,13 +1322,16 @@ impl SyncRuntime {
                     } else {
                         Self::set_deleted_baseline(state, key, remote_heads.clone(), run_id.into());
                         report.deleted_local += 1;
-                        events.push(EngineEvent {
-                            run_id: run_id.into(),
-                            operation_id: format!("{run_id}:delete"),
-                            stage: "delete.apply".into(),
-                            resource: Some(operation.key().clone()),
-                            detail_json: "{}".into(),
-                        });
+                        self.emit_progress(
+                            &mut events,
+                            EngineEvent {
+                                run_id: run_id.into(),
+                                operation_id: format!("{run_id}:delete"),
+                                stage: "delete.apply".into(),
+                                resource: Some(operation.key().clone()),
+                                detail_json: "{}".into(),
+                            },
+                        );
                         Ok(())
                     }
                 }
@@ -1278,13 +1344,16 @@ impl SyncRuntime {
                     .entry(operation.key().scope_id.clone())
                     .or_default() += 1;
                 report.failures += 1;
-                events.push(EngineEvent {
-                    run_id: run_id.into(),
-                    operation_id: run_id.into(),
-                    stage: "error".into(),
-                    resource: Some(operation.key().clone()),
-                    detail_json: serde_json::json!({"error": error.to_string()}).to_string(),
-                });
+                self.emit_progress(
+                    &mut events,
+                    EngineEvent {
+                        run_id: run_id.into(),
+                        operation_id: run_id.into(),
+                        stage: "error".into(),
+                        resource: Some(operation.key().clone()),
+                        detail_json: serde_json::json!({"error": error.to_string()}).to_string(),
+                    },
+                );
             }
             state.save(self.store.as_ref())?;
         }
@@ -1304,22 +1373,25 @@ impl SyncRuntime {
         state.active_run = None;
         state.save(self.store.as_ref())?;
         report.scopes = Self::report_scopes(request, plan, &failures);
-        events.push(EngineEvent {
-            run_id: run_id.into(),
-            operation_id: run_id.into(),
-            stage: "run.complete".into(),
-            resource: None,
-            detail_json: serde_json::json!({
-                "uploaded": report.uploaded,
-                "downloaded": report.downloaded,
-                "deleted_remote": report.deleted_remote,
-                "deleted_local": report.deleted_local,
-                "unchanged": report.unchanged,
-                "conflicts": report.conflicts,
-                "failures": report.failures,
-            })
-            .to_string(),
-        });
+        self.emit_progress(
+            &mut events,
+            EngineEvent {
+                run_id: run_id.into(),
+                operation_id: run_id.into(),
+                stage: "run.complete".into(),
+                resource: None,
+                detail_json: serde_json::json!({
+                    "uploaded": report.uploaded,
+                    "downloaded": report.downloaded,
+                    "deleted_remote": report.deleted_remote,
+                    "deleted_local": report.deleted_local,
+                    "unchanged": report.unchanged,
+                    "conflicts": report.conflicts,
+                    "failures": report.failures,
+                })
+                .to_string(),
+            },
+        );
         Ok((report, events))
     }
 }
@@ -1341,26 +1413,59 @@ impl SyncRuntime {
         let run_id = format!("{}-{}", self.client_id, now_millis());
         let mut state = self.state.lock().expect("runtime state lock poisoned");
         let recovered = state.active_run.take();
+        self.emit(vec![EngineEvent {
+            run_id: run_id.clone(),
+            operation_id: run_id.clone(),
+            stage: "remote.scan.start".into(),
+            resource: None,
+            detail_json: serde_json::json!({"scopes": request.scopes.len()}).to_string(),
+        }]);
         self.refresh_remote(&mut state, &request.scopes)?;
+        self.emit(vec![EngineEvent {
+            run_id: run_id.clone(),
+            operation_id: run_id.clone(),
+            stage: "remote.scan.complete".into(),
+            resource: None,
+            detail_json: serde_json::json!({"commits": state.commits.len()}).to_string(),
+        }]);
         self.snapshot_large_catalogs(&mut state)?;
+        self.emit(vec![EngineEvent {
+            run_id: run_id.clone(),
+            operation_id: run_id.clone(),
+            stage: "local.scan.start".into(),
+            resource: None,
+            detail_json: "{}".into(),
+        }]);
         let local = self.local_inventory(&state, &request.scopes)?;
+        self.emit(vec![EngineEvent {
+            run_id: run_id.clone(),
+            operation_id: run_id.clone(),
+            stage: "local.scan.complete".into(),
+            resource: None,
+            detail_json: serde_json::json!({"resources": local.len()}).to_string(),
+        }]);
         for resource in &local {
             state.kinds.insert(resource.key.encoded(), resource.kind);
         }
         let plan = self.build_plan(&state, &request.scopes, &local)?;
-        let recovery_event = recovered.map(|previous| EngineEvent {
+        self.emit(vec![EngineEvent {
             run_id: run_id.clone(),
-            operation_id: previous.id,
-            stage: "recovery".into(),
+            operation_id: run_id.clone(),
+            stage: "plan.complete".into(),
             resource: None,
-            detail_json: "{}".into(),
-        });
-        let (report, mut events) = self.execute(&request, &mut state, &local, &plan, &run_id)?;
-        drop(state);
-        if let Some(event) = recovery_event {
-            events.insert(0, event);
+            detail_json: serde_json::json!({"operations": plan.operations.len()}).to_string(),
+        }]);
+        if let Some(previous) = recovered {
+            self.emit(vec![EngineEvent {
+                run_id: run_id.clone(),
+                operation_id: previous.id,
+                stage: "recovery".into(),
+                resource: None,
+                detail_json: "{}".into(),
+            }]);
         }
-        self.emit(events);
+        let (report, _events) = self.execute(&request, &mut state, &local, &plan, &run_id)?;
+        drop(state);
         Ok(report)
     }
 
